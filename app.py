@@ -69,8 +69,8 @@ if not api_key:
 
 client = genai.Client(api_key=api_key)
 
-# Modelli stabili in ordine di affidabilità
-MODELS_TO_TRY = ["gemini-1.5-flash", "gemini-2.5-flash", "gemini-2.0-flash"]
+# Modello ufficiale richiesto dal tuo account Google
+ACTIVE_MODEL = "gemini-3.8-flash"
 
 # --- Calcolo Orario e Pasto Attuale ---
 now = datetime.now()
@@ -114,7 +114,6 @@ WEEKLY_QUOTAS = {
     "Colazione - Gallette/Crackers proteici + Yogurt/Ricotta": {"max": 7, "slot": "Colazione", "desc": "Yogurt o ricotta + gallette/fette e noci"}
 }
 
-# Conteggio utilizzi
 consumed_counts = {k: 0 for k in WEEKLY_QUOTAS.keys()}
 rows = cursor.execute("SELECT category_consumed FROM handy_logs WHERE week_number = ?", (current_week_str,)).fetchall()
 for r in rows:
@@ -146,7 +145,7 @@ if st.sidebar.button("🔄 Reset Manuale Settimana"):
     st.toast("Settimana azzerata!")
     st.rerun()
 
-# --- Proposte di emergenza locali ---
+# Proposta locale di sicurezza
 def generate_offline_suggestions(available_items: list):
     proposals = []
     for it in available_items[:3]:
@@ -160,7 +159,7 @@ def generate_offline_suggestions(available_items: list):
         })
     return {"proposals": proposals}
 
-# --- Chiamata API con retry sequenziale ---
+# --- Chiamata API con 3 tentativi anti-sovraccarico (503) ---
 def get_meal_suggestions(meal_slot: str, available_items: list):
     prompt = f"""
     Sei il nutrizionista dell'utente (metodo Handy Diet Low Carb).
@@ -181,17 +180,16 @@ def get_meal_suggestions(meal_slot: str, available_items: list):
       ]
     }}
     """
-    for m in MODELS_TO_TRY:
+    for attempt in range(3):
         try:
             resp = client.models.generate_content(
-                model=m,
+                model=ACTIVE_MODEL,
                 contents=prompt,
                 config={"response_mime_type": "application/json"}
             )
             return json.loads(resp.text)
         except Exception:
-            time.sleep(1)
-            continue
+            time.sleep(2)
     return generate_offline_suggestions(available_items)
 
 def evaluate_meal_photo(image: Image.Image, meal_slot: str, chosen_category: str):
@@ -201,39 +199,39 @@ def evaluate_meal_photo(image: Image.Image, meal_slot: str, chosen_category: str
     Categoria selezionata: {chosen_category}.
     
     Analizza la foto del pasto scattata in hotel:
-    1. Verifica proporzioni handy diet (1 mano di proteine, verdura a pugno, assenza di pane comune/fritti).
-    2. Calcola calorie e macro stimati.
-    3. Assegna un voto di conformità da 1 a 10.
-    4. Fornisci un consiglio immediato per l'albergo.
+    1. Verifica proporzioni handy diet (1 mano di proteine, verdura a pugno, assenza di pane comune/fritti/dolci).
+    2. Se l'utente mostra frutta secca (es. noci o mandorle), conta o stima il numero di pezzi rispetto alla prescrizione (5 noci o 15 mandorle).
+    3. Calcola calorie e macro stimati.
+    4. Assegna un voto di conformità da 1 a 10.
+    5. Fornisci un consiglio immediato per l'albergo.
 
     Rispondi RIGOROSAMENTE con questo formato JSON:
     {{
-      "plate_summary": "Descrizione del cibo nel piatto",
-      "compliance_score": 8,
+      "plate_summary": "Descrizione del cibo nel piatto o nella mano",
+      "compliance_score": 9,
       "distance_verdict": "Sintesi scostamento rispetto al piano",
       "actionable_hotel_tip": "Consiglio pratico per l'albergo",
       "excesses": ["cosa c'è di troppo"],
       "missing": ["cosa manca"],
-      "total_calories": 420,
-      "carbs_g": 15.0,
-      "protein_g": 38.0,
-      "fat_g": 16.0
+      "total_calories": 180,
+      "carbs_g": 3.0,
+      "protein_g": 4.0,
+      "fat_g": 18.0
     }}
     """
     last_err = ""
-    for m in MODELS_TO_TRY:
+    for attempt in range(3):
         try:
             resp = client.models.generate_content(
-                model=m,
+                model=ACTIVE_MODEL,
                 contents=[image, prompt],
                 config={"response_mime_type": "application/json"}
             )
             return json.loads(resp.text)
         except Exception as e:
             last_err = str(e)
-            time.sleep(1)
-            continue
-    raise RuntimeError(f"Server temporaneamente carichi. Ultimo tentativo: {last_err}")
+            time.sleep(2)
+    raise RuntimeError(f"Server Gemini occupati. Riprova tra pochi istanti. Dettaglio: {last_err}")
 
 # --- Interfaccia ---
 st.title("🥗 Handy Diet Tracker")
@@ -298,7 +296,7 @@ with tab_camera:
         st.image(pil_pic, caption="Piatto pronto per l'analisi", use_container_width=True)
 
         if st.button("⚖️ Analizza e Valuta Piatto", type="primary"):
-            with st.spinner("Valutazione piatto..."):
+            with st.spinner("Gemini sta valutando il piatto..."):
                 try:
                     res = evaluate_meal_photo(pil_pic, sel_slot, sel_category)
                     st.session_state["current_eval"] = res
