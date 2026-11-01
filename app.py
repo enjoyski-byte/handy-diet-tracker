@@ -46,15 +46,24 @@ cursor.execute("""
     )
 """)
 
-# Nuova tabella per liquidi e caffè
+# Tabella idratazione e tipologie di caffè
 cursor.execute("""
     CREATE TABLE IF NOT EXISTS hydration_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         entry_date TEXT UNIQUE,
         water_ml INTEGER DEFAULT 0,
-        coffee_count INTEGER DEFAULT 0
+        coffee_count INTEGER DEFAULT 0,
+        coffee_espresso INTEGER DEFAULT 0,
+        coffee_lungo INTEGER DEFAULT 0,
+        coffee_americano INTEGER DEFAULT 0
     )
 """)
+
+existing_hyd_cols = [col[1] for col in cursor.execute("PRAGMA table_info(hydration_logs)").fetchall()]
+for col_name in ["coffee_espresso", "coffee_lungo", "coffee_americano"]:
+    if col_name not in existing_hyd_cols:
+        cursor.execute(f"ALTER TABLE hydration_logs ADD COLUMN {col_name} INTEGER DEFAULT 0")
+
 conn.commit()
 
 # Cartella per archiviare le foto dei pasti
@@ -101,8 +110,10 @@ else:
 current_week_str = now.strftime("%Y-W%W")
 today_str = date.today().isoformat()
 
-# Assicuriamo che esista la riga idratazione per oggi
-cursor.execute("INSERT OR IGNORE INTO hydration_logs (entry_date, water_ml, coffee_count) VALUES (?, 0, 0)", (today_str,))
+cursor.execute("""
+    INSERT OR IGNORE INTO hydration_logs (entry_date, water_ml, coffee_count, coffee_espresso, coffee_lungo, coffee_americano) 
+    VALUES (?, 0, 0, 0, 0, 0)
+""", (today_str,))
 conn.commit()
 
 # --- Quote Settimanali Prescritte (The Handy Diet) ---
@@ -461,24 +472,29 @@ with tab_quotas:
                 if p_img and os.path.exists(p_img):
                     st.image(p_img, caption="Foto registrata", width=300)
 
-# === TAB 4: IDRATAZIONE (ACQUA, TISANE & CAFFÈ) ===
+# === TAB 4: IDRATAZIONE (ACQUA, TISANE & CAFFÈ SPECIFICI) ===
 with tab_water:
     st.subheader("💧 Monitor Idratazione & Caffè di Oggi")
     
-    # Recupera dati di oggi
-    h_data = cursor.execute("SELECT water_ml, coffee_count FROM hydration_logs WHERE entry_date = ?", (today_str,)).fetchone()
+    h_data = cursor.execute("""
+        SELECT water_ml, coffee_count, coffee_espresso, coffee_lungo, coffee_americano 
+        FROM hydration_logs WHERE entry_date = ?
+    """, (today_str,)).fetchone()
+
     current_water_ml = h_data[0] if h_data else 0
     current_coffee = h_data[1] if h_data else 0
+    current_espresso = h_data[2] if (h_data and len(h_data) > 2 and h_data[2] is not None) else 0
+    current_lungo = h_data[3] if (h_data and len(h_data) > 3 and h_data[3] is not None) else 0
+    current_americano = h_data[4] if (h_data and len(h_data) > 4 and h_data[4] is not None) else 0
 
     current_water_l = current_water_ml / 1000.0
     remaining_water_l = max(0.0, target_water_l - current_water_l)
     progress_water = min(1.0, current_water_l / target_water_l)
 
-    # Indicatori KPI
     c_w1, c_w2, c_w3 = st.columns(3)
     c_w1.metric("Acqua / Tisane Bevute", f"{current_water_l:.2f} L", delta=f"{current_water_ml} ml")
     c_w2.metric("Mancanti al Target", f"{remaining_water_l:.2f} L", delta=f"Target: {target_water_l:.1f} L")
-    c_w3.metric("Caffè Consumati", f"{current_coffee} ☕")
+    c_w3.metric("Totale Caffè Oggi", f"{current_coffee} ☕")
 
     st.progress(progress_water)
     if current_water_l >= target_water_l:
@@ -504,25 +520,84 @@ with tab_water:
             conn.commit()
             st.rerun()
 
-    st.markdown("#### Registro Caffè")
-    caf_col1, caf_col2 = st.columns(2)
-    with caf_col1:
-        if st.button("☕ +1 Caffè", use_container_width=True, type="primary"):
-            cursor.execute("UPDATE hydration_logs SET coffee_count = coffee_count + 1 WHERE entry_date = ?", (today_str,))
+    st.markdown("---")
+    st.markdown("#### Registro Tipologia Caffè")
+
+    # Colonne per registrare Espresso, Lungo, Americano
+    k_col1, k_col2, k_col3 = st.columns(3)
+    with k_col1:
+        st.metric("Espresso", f"{current_espresso}")
+        if st.button("☕ +1 Espresso", use_container_width=True, type="primary"):
+            cursor.execute("""
+                UPDATE hydration_logs 
+                SET coffee_espresso = coffee_espresso + 1, coffee_count = coffee_count + 1 
+                WHERE entry_date = ?
+            """, (today_str,))
             conn.commit()
             st.rerun()
-    with caf_col2:
-        if current_coffee > 0:
-            if st.button("↩️ Annulla ultimo caffè", use_container_width=True):
-                cursor.execute("UPDATE hydration_logs SET coffee_count = max(0, coffee_count - 1) WHERE entry_date = ?", (today_str,))
+        if current_espresso > 0:
+            if st.button("↩️ -1 Espresso", use_container_width=True):
+                cursor.execute("""
+                    UPDATE hydration_logs 
+                    SET coffee_espresso = max(0, coffee_espresso - 1), coffee_count = max(0, coffee_count - 1) 
+                    WHERE entry_date = ?
+                """, (today_str,))
+                conn.commit()
+                st.rerun()
+
+    with k_col2:
+        st.metric("Lungo", f"{current_lungo}")
+        if st.button("☕ +1 Lungo", use_container_width=True, type="primary"):
+            cursor.execute("""
+                UPDATE hydration_logs 
+                SET coffee_lungo = coffee_lungo + 1, coffee_count = coffee_count + 1 
+                WHERE entry_date = ?
+            """, (today_str,))
+            conn.commit()
+            st.rerun()
+        if current_lungo > 0:
+            if st.button("↩️ -1 Lungo", use_container_width=True):
+                cursor.execute("""
+                    UPDATE hydration_logs 
+                    SET coffee_lungo = max(0, coffee_lungo - 1), coffee_count = max(0, coffee_count - 1) 
+                    WHERE entry_date = ?
+                """, (today_str,))
+                conn.commit()
+                st.rerun()
+
+    with k_col3:
+        st.metric("Americano", f"{current_americano}")
+        if st.button("☕ +1 Americano", use_container_width=True, type="primary"):
+            # L'americano aggiunge anche circa 150ml di acqua all'idratazione
+            cursor.execute("""
+                UPDATE hydration_logs 
+                SET coffee_americano = coffee_americano + 1, coffee_count = coffee_count + 1, water_ml = water_ml + 150 
+                WHERE entry_date = ?
+            """, (today_str,))
+            conn.commit()
+            st.rerun()
+        if current_americano > 0:
+            if st.button("↩️ -1 Americano", use_container_width=True):
+                cursor.execute("""
+                    UPDATE hydration_logs 
+                    SET coffee_americano = max(0, coffee_americano - 1), coffee_count = max(0, coffee_count - 1), water_ml = max(0, water_ml - 150) 
+                    WHERE entry_date = ?
+                """, (today_str,))
                 conn.commit()
                 st.rerun()
 
     with st.expander("Modifica manuale o azzera idratazione di oggi"):
         man_ml = st.number_input("Imposta ml acqua totali oggi", min_value=0, max_value=8000, value=current_water_ml, step=100)
-        man_caf = st.number_input("Imposta numero caffè totali oggi", min_value=0, max_value=20, value=current_coffee, step=1)
+        man_esp = st.number_input("Espresso", min_value=0, max_value=20, value=current_espresso, step=1)
+        man_lng = st.number_input("Lungo", min_value=0, max_value=20, value=current_lungo, step=1)
+        man_amr = st.number_input("Americano", min_value=0, max_value=20, value=current_americano, step=1)
         if st.button("Aggiorna valori manuali"):
-            cursor.execute("UPDATE hydration_logs SET water_ml = ?, coffee_count = ? WHERE entry_date = ?", (man_ml, man_caf, today_str))
+            man_tot_caf = man_esp + man_lng + man_amr
+            cursor.execute("""
+                UPDATE hydration_logs 
+                SET water_ml = ?, coffee_count = ?, coffee_espresso = ?, coffee_lungo = ?, coffee_americano = ? 
+                WHERE entry_date = ?
+            """, (man_ml, man_tot_caf, man_esp, man_lng, man_amr, today_str))
             conn.commit()
             st.rerun()
 
