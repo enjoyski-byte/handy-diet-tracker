@@ -1,24 +1,27 @@
 import os
 import json
 import sqlite3
-from datetime import date
+from datetime import datetime, date
 from PIL import Image
 import pandas as pd
 import streamlit as st
 from google import genai
 
-st.set_page_config(page_title="Handy Diet & Weight Tracker", page_icon="⚖️", layout="centered")
+st.set_page_config(page_title="Handy Diet Weekly Planner", page_icon="🥗", layout="centered")
 
 # --- Inizializzazione Database SQLite ---
 conn = sqlite3.connect("meals.db", check_same_thread=False)
 cursor = conn.cursor()
 
-# Tabella pasti
+# Tabella storico pasti
 cursor.execute("""
     CREATE TABLE IF NOT EXISTS handy_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         entry_date TEXT,
+        entry_time TEXT,
+        week_number TEXT,
         meal_type TEXT,
+        category_consumed TEXT,
         score INTEGER,
         plate_summary TEXT,
         calories INTEGER,
@@ -29,7 +32,7 @@ cursor.execute("""
     )
 """)
 
-# Tabella peso corporeo
+# Tabella controllo peso
 cursor.execute("""
     CREATE TABLE IF NOT EXISTS weight_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -39,7 +42,7 @@ cursor.execute("""
 """)
 conn.commit()
 
-# --- Configurazione API Gemini ---
+# --- Configurazione Chiave API Gemini ---
 api_key = None
 try:
     if "GEMINI_API_KEY" in st.secrets:
@@ -51,135 +54,280 @@ if not api_key:
     api_key = os.getenv("GEMINI_API_KEY")
 
 if not api_key:
-    api_key = st.sidebar.text_input("Inserisci qui la tua Gemini API Key", type="password")
+    api_key = st.sidebar.text_input("Inserisci la tua Gemini API Key", type="password")
 
 if not api_key:
-    st.info("👉 Inserisci la tua Gemini API Key a sinistra per avviare l'assistente.")
+    st.info("👉 Inserisci la tua API Key di Gemini nella barra laterale per attivare l'assistente.")
     st.stop()
 
 client = genai.Client(api_key=api_key)
 
-# --- Sidebar: Parametri e Obiettivo Peso ---
-st.sidebar.header("🎯 Target & Impostazioni")
-target_weight = st.sidebar.number_input("Obiettivo Peso Corporeo (kg)", min_value=50.0, max_value=150.0, value=75.0, step=0.5)
+# --- Calcolo Orario e Pasto Attuale ---
+now = datetime.now()
+hour_float = now.hour + now.minute / 60.0
 
-# --- Profilo Dieta & Prompt Regolatore ---
-DIET_GUIDELINES = """
-REGOLE DIETA UTENTE (Metodo "Handy Diet" Low Carb):
-1. PRANZO:
-   - Proteine: 1 mano (carne bianca/rossa ai ferri, pesce o 2 uova o salmone 4 fette).
-   - Carboidrati: Solo 2 gallette tipo norvegesi/cracker proteici (oppure max 2 volte a settimana pasta a "pugno schiacciato").
-   - Verdura: 1 pugno e mezzo cruda o 1 pugno cotta (condita con max 1 cucchiaio olio EVO).
-2. CENA:
-   - Proteine: 1 mano di pesce semplice o carne bianca/uova.
-   - Carboidrati: 2 gallette/cracker proteici (NO pasta, NO pane comune).
-   - Verdura: Minimo 1 pugno e mezzo cruda o cotta.
-3. COLAZIONE / SPUNTINI:
-   - Yogurt intero/ricotta + noci (5) o mandorle (15) + 2 gallette/cracker. Frutta: 1 pugno (1 volta al giorno).
-4. AMBIENTE HOTEL / BUFFET:
-   - Massima attenzione a: fritti, salse grasse, intingoli con burro, cibi impanati, pane bianco e dolci da buffet.
-"""
+if 6.0 <= hour_float < 9.0:
+    current_slot = "Colazione"
+elif 11.0 <= hour_float < 15.0:
+    current_slot = "Pranzo"
+elif 15.5 <= hour_float < 18.0:
+    current_slot = "Spuntino"
+elif 18.5 <= hour_float < 22.0:
+    current_slot = "Cena"
+elif 22.0 <= hour_float <= 24.0 or hour_float < 2.0:
+    current_slot = "Spuntino Serale"
+else:
+    current_slot = "Pranzo"
 
-def evaluate_meal_against_diet(image: Image.Image, meal_type: str):
+# Calcolo settimana corrente (es. 2026-W44)
+current_week_str = now.strftime("%Y-W%W")
+
+# --- Quote Settimanali Prescritte (The Handy Diet) ---
+WEEKLY_QUOTAS = {
+    # PRANZO
+    "Pranzo - Pasta / Riso (pugno schiacciato)": {"max": 2, "slot": "Pranzo", "desc": "Primo pasta/riso + verdura cotta (1 pugno)"},
+    "Pranzo - Carne / Bistecca / Arrosto (1 mano)": {"max": 2, "slot": "Pranzo", "desc": "Carne ai ferri/arrosto + verdura cruda (1 pugno e mezzo)"},
+    "Pranzo - Salmone / Tonno / Pesce veloce": {"max": 1, "slot": "Pranzo", "desc": "Salmone affumicato 4 fette o tonno in vetro + verdura"},
+    "Pranzo - Uova sode (2 unità)": {"max": 1, "slot": "Pranzo", "desc": "2 uova sode in insalatona mista"},
+    "Pranzo - Zuppa di legumi (1 fondina)": {"max": 1, "slot": "Pranzo", "desc": "Zuppa di legumi (250 ml) + verdura cotta"},
+    
+    # CENA
+    "Cena - Pesce semplice al vapore/ferri (1 mano)": {"max": 2, "slot": "Cena", "desc": "Pesce bianco/orata/merluzzo + verdura mista"},
+    "Cena - Bastoncini / Croccole / Merluzzo erbe": {"max": 1, "slot": "Cena", "desc": "6 bastoncini Findus al forno o croccola ai semi + verdura"},
+    "Cena - Uova strapazzate / tegamino / frittata (2 uova)": {"max": 1, "slot": "Cena", "desc": "2 uova in padella + verdura cruda (1 pugno e mezzo)"},
+    "Cena - Petto di pollo / tacchino ai ferri (1 mano)": {"max": 1, "slot": "Cena", "desc": "Petto di pollo ai ferri (1 mano) + verdura"},
+    "Cena - Minestrone verdure con legumi e patate (500 ml)": {"max": 2, "slot": "Cena", "desc": "1 scodella grande minestrone + 2 dita formaggio stagionato"},
+    "Cena - Pasto Libero settimanale": {"max": 1, "slot": "Cena", "desc": "Pasto libero con moderazione (senza pizza)"},
+    
+    # SPUNTINI & COLAZIONE
+    "Spuntino Pomeridiano - Frutta fresca (1 pugno)": {"max": 7, "slot": "Spuntino", "desc": "1 frutto intero (mela, pera, kiwi)"},
+    "Spuntino Serale - Gallette + Noci/Mandorle o Cioccolato 85%": {"max": 4, "slot": "Spuntino Serale", "desc": "2 gallette norvegesi + 15 mandorle o 2 quadretti fondente 85%"},
+    "Colazione - Gallette/Crackers proteici + Yogurt/Ricotta": {"max": 7, "slot": "Colazione", "desc": "Yogurt o ricotta + gallette/fette e noci"}
+}
+
+# Conteggio utilizzi nella settimana corrente
+consumed_counts = {k: 0 for k in WEEKLY_QUOTAS.keys()}
+rows = cursor.execute("SELECT category_consumed FROM handy_logs WHERE week_number = ?", (current_week_str,)).fetchall()
+for r in rows:
+    cat = r[0]
+    if cat in consumed_counts:
+        consumed_counts[cat] += 1
+
+# Calcolo rimanenze
+remaining_options = {}
+for cat, meta in WEEKLY_QUOTAS.items():
+    rem = meta["max"] - consumed_counts.get(cat, 0)
+    remaining_options[cat] = {
+        "max": meta["max"],
+        "used": consumed_counts.get(cat, 0),
+        "remaining": max(0, rem),
+        "slot": meta["slot"],
+        "desc": meta["desc"]
+    }
+
+# --- Sidebar: Impostazioni & Reset ---
+st.sidebar.header("🎯 Impostazioni")
+target_weight = st.sidebar.number_input("Target Peso Corporeo (kg)", min_value=50.0, max_value=150.0, value=75.0, step=0.5)
+
+st.sidebar.divider()
+st.sidebar.markdown(f"**Settimana attiva:** `{current_week_str}`")
+st.sidebar.caption("Il monte alimenti si resetta automaticamente alla fine della domenica sera.")
+if st.sidebar.button("🔄 Reset Manuale Settimana"):
+    cursor.execute("DELETE FROM handy_logs WHERE week_number = ?", (current_week_str,))
+    conn.commit()
+    st.toast("Settimana azzerata!")
+    st.rerun()
+
+# --- Funzione Gemini per Proposta Pasto in base ai Residui ---
+def get_meal_suggestions(meal_slot: str, available_items: list):
     prompt = f"""
-    Sei il nutrizionista e coach personale dell'utente. L'utente sta seguendo questa dieta:
-    {DIET_GUIDELINES}
+    Sei il nutrizionista dell'utente (metodo Handy Diet Low Carb).
+    È il momento del pasto: **{meal_slot}**.
+    L'utente è in albergo/ristorante e durante questa settimana ha un monte piatti da consumare.
+    Ecco le opzioni rimaste DISPONIBILI per il pasto di {meal_slot}:
+    {json.dumps(available_items, ensure_ascii=False, indent=2)}
 
-    L'utente è in albergo/ristorante e ti invia la foto di ciò che sta per mangiare per il pasto: **{meal_type}**.
-    Valuta quanto questo piatto è distante dalla sua dieta prescritta.
+    Genera 3 proposte di piatti veloci e adatte a chi mangia al buffet o al ristorante dell'albergo, combinando SOLO le opzioni ancora disponibili sopra.
+    Per ogni proposta specifica:
+    - Nome del piatto
+    - Come comporlo al buffet/ristorante (porzioni a mano/pugno)
+    - Quale opzione della lista andrà a spuntare
 
-    Istruzioni di analisi:
-    1. Identifica cosa c'è nel piatto e stima porzioni in termini di volume "mano/pugno" e grammi approssimativi.
-    2. Calcola calorie e macro (carboidrati, proteine, grassi).
-    3. Assegna un punteggio di conformità alla dieta (score) da 1 a 10 (10 = perfetto rispetto alla Handy Diet, 1 = sgarro totale).
-    4. Distanza dalla dieta: elenca cosa c'è di troppo (es. troppo olio, pane non previsto, carboidrati in eccesso) e cosa manca (es. mancano le verdure o proteine scarse).
-    5. Consiglio operativo immediato per l'albergo (es. "Lascia nel piatto il cestino del pane e aggiungi un piatto di finocchi/pomodori dal buffet").
+    Rispondi rigorosamente ed esclusivamente con questo formato JSON:
+    {{
+      "proposals": [
+        {{
+          "title": "Titolo proposta 1",
+          "matched_category": "Nome esatto della categoria rimasta",
+          "hotel_advice": "Istruzioni su cosa prendere al buffet (es. 1 mano di carne ai ferri + 1 pugno e mezzo di verdura cruda senza salse)",
+          "why": "Perché è adatta oggi"
+        }}
+      ]
+    }}
+    """
+    resp = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt,
+        config={"response_mime_type": "application/json"}
+    )
+    return json.loads(resp.text)
+
+# --- Funzione Gemini per Analisi Foto Piatto ---
+def evaluate_meal_photo(image: Image.Image, meal_slot: str, chosen_category: str):
+    prompt = f"""
+    Sei il nutrizionista personale dell'utente (metodo Handy Diet Low Carb).
+    Pasto in corso: {meal_slot}.
+    Categoria selezionata dal piano settimanale: {chosen_category}.
+    
+    Analizza la foto del pasto scattata in hotel:
+    1. Verifica se rispetta le proporzioni handy diet (1 mano di proteine, verdura a pugno, assenza di pane comune/fritti/salse grasse).
+    2. Calcola calorie, carboidrati, proteine e grassi stimati.
+    3. Assegna un voto di conformità da 1 a 10.
+    4. Fornisci un consiglio immediato per il buffet dell'albergo (es. cosa lasciare nel piatto o cosa aggiungere).
 
     Rispondi RIGOROSAMENTE con questo formato JSON:
     {{
-      "plate_summary": "Breve descrizione del piatto analizzato",
+      "plate_summary": "Descrizione del cibo nel piatto",
       "compliance_score": 8,
-      "distance_verdict": "Sintesi: Sei molto vicino / Sei troppo alto di carboidrati / Troppi grassi nascosti",
-      "excesses": ["es. Porzione di pasta doppia rispetto al pugno", "presenza di condimento abbondante"],
-      "missing": ["es. Manca la quota di verdure di accompagnamento"],
-      "actionable_hotel_tip": "Consiglio pratico per gestire il buffet o cosa lasciare nel piatto.",
-      "total_calories": 450,
-      "carbs_g": 20.0,
-      "protein_g": 35.0,
-      "fat_g": 18.0
+      "distance_verdict": "Sintesi scostamento rispetto al piano",
+      "actionable_hotel_tip": "Consiglio pratico per l'albergo",
+      "excesses": ["cosa c'è di troppo"],
+      "missing": ["cosa manca"],
+      "total_calories": 420,
+      "carbs_g": 15.0,
+      "protein_g": 38.0,
+      "fat_g": 16.0
     }}
     """
-    response = client.models.generate_content(
+    resp = client.models.generate_content(
         model="gemini-2.5-flash",
         contents=[image, prompt],
         config={"response_mime_type": "application/json"}
     )
-    return json.loads(response.text)
+    return json.loads(resp.text)
 
-# --- Interfaccia Grafica ---
-st.title("🥗 Handy Diet & Weight Tracker")
+# --- Interfaccia Principale ---
+st.title("🥗 Handy Diet Tracker")
+st.caption(f"Orario rilevato: **{now.strftime('%H:%M')}** ➔ Pasto suggerito: **{current_slot}**")
 
-tab_check, tab_history, tab_weight = st.tabs(["📸 Verifica Piatto Hotel", "📋 Registro Pasti", "⚖️ Controllo Peso"])
+tab_suggest, tab_camera, tab_quotas, tab_weight = st.tabs([
+    "💡 Proposta Pasto",
+    "📸 Fotografa & Scala",
+    "📊 Monte Settimanale",
+    "⚖️ Controllo Peso"
+])
 
-# === TAB 1: VERIFICA PIATTO HOTEL ===
-with tab_check:
-    meal_type = st.selectbox("Quale pasto stai consumando?", ["Pranzo", "Cena", "Colazione", "Spuntino"])
+# === TAB 1: PROPOSTA PIATTI BASATA SULLE RIMANENZE ===
+with tab_suggest:
+    st.subheader(f"Cosa mangiare adesso ({current_slot})")
+    
+    # Filtriamo le opzioni valide per questo orario con rimanenza > 0
+    slot_available = [
+        {"categoria": k, "rimaste": v["remaining"], "massimo": v["max"], "descrizione": v["desc"]}
+        for k, v in remaining_options.items()
+        if v["slot"] == current_slot and v["remaining"] > 0
+    ]
 
-    method = st.radio("Acquisizione foto:", ["Fotocamera", "Carica foto"], horizontal=True)
-    img_input = st.camera_input("Inquadra il piatto o il vassoio") if method == "Fotocamera" else st.file_uploader("Carica immagine", type=["jpg", "jpeg", "png"])
-
-    if img_input:
-        pil_img = Image.open(img_input)
-        st.image(pil_img, caption="Piatto da esaminare", use_container_width=True)
-
-        if st.button("⚖️ Valuta Distanza dalla Dieta", type="primary"):
-            with st.spinner("Gemini sta confrontando il piatto con la tua dieta Handy Diet..."):
+    if not slot_available:
+        st.warning(f"⚠️ Hai già completato tutti i piatti pianificati per **{current_slot}** di questa settimana! Puoi ripetere una fonte proteica magra con verdure o concederti il pasto libero se ancora disponibile.")
+    else:
+        st.markdown(f"Hai ancora **{len(slot_available)} opzioni disponibili** per questo pasto prima del reset di domenica sera.")
+        
+        if st.button("✨ Fatti suggerire 3 piatti da Gemini", type="primary"):
+            with st.spinner("Gemini sta analizzando le tue rimanenze della settimana..."):
                 try:
-                    res = evaluate_meal_against_diet(pil_img, meal_type)
-                    st.session_state["handy_eval"] = res
-                    st.session_state["eval_meal_type"] = meal_type
+                    sugg = get_meal_suggestions(current_slot, slot_available)
+                    st.session_state["suggestions"] = sugg.get("proposals", [])
                 except Exception as e:
-                    st.error(f"Errore durante l'analisi: {e}")
+                    st.error(f"Errore generazione proposta: {e}")
 
-        if "handy_eval" in st.session_state:
-            data = st.session_state["handy_eval"]
+        if "suggestions" in st.session_state and st.session_state["suggestions"]:
+            st.divider()
+            for idx, p in enumerate(st.session_state["suggestions"], 1):
+                st.markdown(f"### Proposta {idx}: {p.get('title')}")
+                st.markdown(f"**Categoria da scalare:** `{p.get('matched_category')}`")
+                st.info(f"🍽️ **Come comporlo al buffet/hotel:** {p.get('hotel_advice')}")
+                st.caption(f"Motivazione: {p.get('why')}")
+                st.divider()
+
+# === TAB 2: FOTOGRAFA E SCALA DALLA SETTIMANA ===
+with tab_camera:
+    st.subheader("Verifica piatto e registra consumo")
+    
+    col_s1, col_s2 = st.columns(2)
+    with col_s1:
+        sel_slot = st.selectbox("Pasto da registrare:", ["Colazione", "Pranzo", "Spuntino", "Cena", "Spuntino Serale"], index=["Colazione", "Pranzo", "Spuntino", "Cena", "Spuntino Serale"].index(current_slot))
+    with col_s2:
+        # Mostra le categorie per questo pasto con il conteggio rimanente
+        cat_choices = [k for k, v in remaining_options.items() if v["slot"] == sel_slot]
+        if not cat_choices:
+            cat_choices = list(WEEKLY_QUOTAS.keys())
+        sel_category = st.selectbox(
+            "Seleziona quale voce della dieta stai consumando:",
+            cat_choices,
+            format_func=lambda x: f"{x} (Rimaste: {remaining_options.get(x, {}).get('remaining', 0)}/{remaining_options.get(x, {}).get('max', 0)})"
+        )
+
+    mode = st.radio("Foto da:", ["Fotocamera", "Carica da galleria"], horizontal=True)
+    pic = st.camera_input("Scatta la foto del piatto") if mode == "Fotocamera" else st.file_uploader("Carica file", type=["jpg", "jpeg", "png"])
+
+    if pic:
+        pil_pic = Image.open(pic)
+        st.image(pil_pic, caption="Piatto pronto per l'analisi", use_container_width=True)
+
+        if st.button("⚖️ Analizza e Valuta Piatto", type="primary"):
+            with st.spinner("Confronto in corso con la Handy Diet..."):
+                try:
+                    res = evaluate_meal_photo(pil_pic, sel_slot, sel_category)
+                    st.session_state["current_eval"] = res
+                    st.session_state["saved_slot"] = sel_slot
+                    st.session_state["saved_category"] = sel_category
+                except Exception as e:
+                    st.error(f"Errore analisi: {e}")
+
+        if "current_eval" in st.session_state:
+            data = st.session_state["current_eval"]
             score = data.get("compliance_score", 5)
 
             st.divider()
             if score >= 8:
-                st.success(f"🎯 **Aderenza alla dieta: {score}/10 (Ottimo)**")
+                st.success(f"🎯 **Aderenza al pasto: {score}/10 (Ottimo)**")
             elif score >= 5:
-                st.warning(f"⚠️ **Aderenza alla dieta: {score}/10 (Accettabile con scostamenti)**")
+                st.warning(f"⚠️ **Aderenza al pasto: {score}/10 (Attenzione ad alcuni ingredienti)**")
             else:
-                st.error(f"🚨 **Aderenza alla dieta: {score}/10 (Molto distante dal piano)**")
+                st.error(f"🚨 **Aderenza: {score}/10 (Molto distante dal piano prescritto)**")
 
             st.write(f"**Verdetto:** {data.get('distance_verdict')}")
-            st.info(f"🏨 **Cosa fare adesso in albergo:** {data.get('actionable_hotel_tip')}")
+            st.info(f"🏨 **Consiglio pratico per l'hotel:** {data.get('actionable_hotel_tip')}")
 
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("**❌ Cosa c'è di troppo / sconsigliato:**")
-                for ex in data.get("excesses", []):
-                    st.write(f"- {ex}")
-            with col2:
-                st.markdown("**🥗 Cosa manca rispetto al piano:**")
-                for mis in data.get("missing", []):
-                    st.write(f"- {mis}")
+            c_ex, c_mis = st.columns(2)
+            with c_ex:
+                st.markdown("**❌ Eccessi riscontrati:**")
+                for e in data.get("excesses", []):
+                    st.write(f"- {e}")
+            with c_mis:
+                st.markdown("**🥗 Carenze:**")
+                for m in data.get("missing", []):
+                    st.write(f"- {m}")
 
-            st.markdown("##### Stima Nutrizionale")
-            k1, k2, k3, k4 = st.columns(4)
-            k1.metric("Kcal Stimate", f"{data.get('total_calories')} kcal")
-            k2.metric("Carboidrati", f"{data.get('carbs_g')} g")
-            k3.metric("Proteine", f"{data.get('protein_g')} g")
-            k4.metric("Grassi", f"{data.get('fat_g')} g")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Kcal", f"{data.get('total_calories')} kcal")
+            m2.metric("Carboidrati", f"{data.get('carbs_g')} g")
+            m3.metric("Proteine", f"{data.get('protein_g')} g")
+            m4.metric("Grassi", f"{data.get('fat_g')} g")
 
-            if st.button("💾 Salva pasto nel diario"):
+            if st.button("💾 Salva e SCALA dal monte settimanale", type="primary"):
                 cursor.execute("""
-                    INSERT INTO handy_logs (entry_date, meal_type, score, plate_summary, calories, carbs_g, protein_g, fat_g, verdict)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO handy_logs (
+                        entry_date, entry_time, week_number, meal_type, category_consumed,
+                        score, plate_summary, calories, carbs_g, protein_g, fat_g, verdict
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     date.today().isoformat(),
-                    st.session_state.get("eval_meal_type", "Pasto"),
+                    datetime.now().strftime("%H:%M"),
+                    current_week_str,
+                    st.session_state.get("saved_slot", sel_slot),
+                    st.session_state.get("saved_category", sel_category),
                     score,
                     data.get("plate_summary"),
                     data.get("total_calories"),
@@ -189,100 +337,86 @@ with tab_check:
                     data.get("distance_verdict")
                 ))
                 conn.commit()
-                st.toast("Pasto registrato!")
-                del st.session_state["handy_eval"]
+                st.toast(f"Pasto registrato! Scalato 1 consumo da: {st.session_state.get('saved_category')}")
+                del st.session_state["current_eval"]
                 st.rerun()
 
-# === TAB 2: REGISTRO PASTI ===
-with tab_history:
-    today_str = date.today().isoformat()
-    df_meals = pd.read_sql_query("SELECT entry_date, meal_type, score, plate_summary, calories, carbs_g, protein_g, fat_g FROM handy_logs WHERE entry_date = ?", conn, params=(today_str,))
-    if df_meals.empty:
-        st.write("Nessun pasto registrato oggi.")
+# === TAB 3: MONTE SETTIMANALE & RESIDUI ===
+with tab_quotas:
+    st.subheader(f"Stato Settimana ({current_week_str})")
+    st.caption("Ogni voce indica quante volte l'hai consumata e quante te ne restano prima del reset di domenica sera.")
+
+    table_data = []
+    for cat, val in remaining_options.items():
+        table_data.append({
+            "Pasto": val["slot"],
+            "Alimento / Preparazione": cat.split(" - ")[-1],
+            "Fatti": val["used"],
+            "Previsti": val["max"],
+            "Rimanenti": val["remaining"]
+        })
+
+    df_quotas = pd.DataFrame(table_data)
+    
+    # Visualizzazione per pasto
+    for s_name in ["Colazione", "Pranzo", "Spuntino", "Cena", "Spuntino Serale"]:
+        sub = df_quotas[df_quotas["Pasto"] == s_name]
+        if not sub.empty:
+            st.markdown(f"#### 🍽️ {s_name}")
+            st.dataframe(sub[["Alimento / Preparazione", "Fatti", "Previsti", "Rimanenti"]], hide_index=True)
+
+    st.divider()
+    st.subheader("Pasti registrati questa settimana")
+    df_week_logs = pd.read_sql_query(
+        "SELECT entry_date, entry_time, meal_type, category_consumed, score, calories FROM handy_logs WHERE week_number = ? ORDER BY id DESC",
+        conn,
+        params=(current_week_str,)
+    )
+    if not df_week_logs.empty:
+        st.dataframe(df_week_logs, hide_index=True)
     else:
-        avg_score = df_meals["score"].mean()
-        st.metric("Voto Medio Aderenza Oggi", f"{avg_score:.1f} / 10")
-        st.dataframe(df_meals, hide_index=True)
-        if st.button("Azzera storico pasti di oggi"):
-            cursor.execute("DELETE FROM handy_logs WHERE entry_date = ?", (today_str,))
+        st.write("Nessun pasto registrato finora in questa settimana.")
+
+# === TAB 4: CONTROLLO PESO ===
+with tab_weight:
+    st.subheader("⚖️ Diario Peso Corporeo")
+    
+    w1, w2, w3 = st.columns([2, 2, 1.5])
+    with w1:
+        w_date = st.date_input("Data pesata", value=date.today())
+    with w2:
+        w_val = st.number_input("Peso (kg)", min_value=40.0, max_value=160.0, value=80.0, step=0.1, format="%.1f")
+    with w3:
+        st.write("")
+        st.write("")
+        if st.button("💾 Registra Peso", type="primary"):
+            cursor.execute("""
+                INSERT INTO weight_logs (entry_date, weight_kg)
+                VALUES (?, ?)
+                ON CONFLICT(entry_date) DO UPDATE SET weight_kg = excluded.weight_kg
+            """, (w_date.isoformat(), w_val))
             conn.commit()
+            st.toast(f"Peso {w_val} kg salvato!")
             st.rerun()
 
-# === TAB 3: CONTROLLO PESO & PROGRESSI ===
-with tab_weight:
-    st.subheader("⚖️ Diario del Peso & Analisi Tendenza")
-    
-    # Inserimento peso
-    w_col1, w_col2, w_col3 = st.columns([2, 2, 1.5])
-    with w_col1:
-        input_date = st.date_input("Data misurazione", value=date.today())
-    with w_col2:
-        new_weight = st.number_input("Peso rilevato (kg)", min_value=40.0, max_value=180.0, value=80.0, step=0.1, format="%.1f")
-    with w_col3:
-        st.write("")
-        st.write("")
-        save_w_btn = st.button("💾 Registra", type="primary")
+    df_w = pd.read_sql_query("SELECT entry_date, weight_kg FROM weight_logs ORDER BY entry_date ASC", conn)
+    if not df_w.empty:
+        df_w["entry_date"] = pd.to_datetime(df_w["entry_date"])
+        latest_w = df_w.iloc[-1]["weight_kg"]
+        init_w = df_w.iloc[0]["weight_kg"]
+        d_tot = latest_w - init_w
+        d_last = (latest_w - df_w.iloc[-2]["weight_kg"]) if len(df_w) > 1 else 0.0
 
-    if save_w_btn:
-        cursor.execute("""
-            INSERT INTO weight_logs (entry_date, weight_kg)
-            VALUES (?, ?)
-            ON CONFLICT(entry_date) DO UPDATE SET weight_kg = excluded.weight_kg
-        """, (input_date.isoformat(), new_weight))
-        conn.commit()
-        st.toast(f"Peso di {new_weight} kg registrato per il {input_date}!")
-        st.rerun()
-
-    # Lettura storico pesate
-    df_weight = pd.read_sql_query("SELECT entry_date, weight_kg FROM weight_logs ORDER BY entry_date ASC", conn)
-
-    if not df_weight.empty:
-        df_weight["entry_date"] = pd.to_datetime(df_weight["entry_date"])
-        df_weight = df_weight.sort_values("entry_date").reset_index(drop=True)
-
-        latest_weight = df_weight.iloc[-1]["weight_kg"]
-        initial_weight = df_weight.iloc[0]["weight_kg"]
-        delta_total = latest_weight - initial_weight
-        delta_target = latest_weight - target_weight
-
-        # Calcolo variazione dall'ultima pesata
-        if len(df_weight) > 1:
-            prev_weight = df_weight.iloc[-2]["weight_kg"]
-            delta_last = latest_weight - prev_weight
-        else:
-            delta_last = 0.0
-
-        # KPI metriche
         st.divider()
-        m_col1, m_col2, m_col3 = st.columns(3)
-        m_col1.metric("Peso Attuale", f"{latest_weight:.1f} kg", delta=f"{delta_last:+.1f} kg (vs ultima)" if len(df_weight) > 1 else None, delta_color="inverse")
-        m_col2.metric("Variazione Totale", f"{delta_total:+.1f} kg", delta_color="inverse")
-        m_col3.metric("Mancanti all'Obiettivo", f"{delta_target:+.1f} kg", delta=f"Target: {target_weight:.1f} kg")
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Peso Attuale", f"{latest_w:.1f} kg", delta=f"{d_last:+.1f} kg (vs ultima)" if len(df_w) > 1 else None, delta_color="inverse")
+        k2.metric("Variazione Inizio", f"{d_tot:+.1f} kg", delta_color="inverse")
+        k3.metric("Mancanti al Target", f"{latest_w - target_weight:+.1f} kg", delta=f"Target: {target_weight:.1f} kg")
 
-        # --- SISTEMA ALERT DI PEGGIORAMENTO ---
-        if delta_last > 0.4:
-            st.warning(f"⚠️ **ATTENZIONE - AUMENTO RILEVATO (+{delta_last:.1f} kg rispetto all'ultima pesata)**")
-            st.info("💡 **Consiglio clinico Handy Diet:** Ricorda che le variazioni giornaliere repentine dipendono spesso da ritenzione idrica o sodio dei pasti fuori casa. Non abbatterti: mantieni rigorosa la quota proteica a '1 mano', aumenta le verdure crude ed evita il pane al buffet stasera.")
-        elif delta_total > 1.0 and len(df_weight) >= 3:
-            st.error(f"🚨 **ALLERTA TENDENZA NEGATIVA: Sei a +{delta_total:.1f} kg dall'inizio del percorso.**")
-            st.write("Verifica se negli ultimi giorni in hotel ci sono stati carboidrati non calcolati a cena, condimenti nascosti o porzioni proteiche oltre la misura.")
+        if d_last > 0.4:
+            st.warning(f"⚠️ **ATTENZIONE: +{d_last:.1f} kg rispetto all'ultima pesata.**")
+            st.info("💡 Le oscillazioni veloci sono legate a liquidi e sale dei pasti fuori casa. Tieni alte le verdure e limita i condimenti al buffet stasera.")
         else:
-            st.success("✅ **Tendenza sotto controllo:** Stai procedendo verso l'obiettivo. Ricorda che 2 kg al mese rappresentano il ritmo ideale per un calo di peso sano e sostenibile.")
+            st.success("✅ **Andamento regolare.** Ricorda che -2 kg al mese è il ritmo ottimale e duraturo.")
 
-        # --- GRAFICO ANDAMENTO ---
-        st.markdown("#### Curva di Andamento del Peso")
-        # Prepariamo un dataframe pulito per il grafico
-        chart_df = df_weight.set_index("entry_date")[["weight_kg"]]
-        chart_df["Target"] = target_weight
-        st.line_chart(chart_df)
-
-        # Tabella Storico con opzione cancellazione
-        with st.expander("Visualizza o elimina registrazioni passate"):
-            st.dataframe(df_weight.sort_values("entry_date", ascending=False), hide_index=True)
-            del_date = st.selectbox("Seleziona data da rimuovere", df_weight["entry_date"].dt.strftime("%Y-%m-%d"))
-            if st.button("Elimina pesata selezionata"):
-                cursor.execute("DELETE FROM weight_logs WHERE entry_date = ?", (del_date,))
-                conn.commit()
-                st.rerun()
-    else:
-        st.info("Non hai ancora registrato nessuna pesata. Inserisci il peso di oggi per iniziare il tracciamento.")
+        st.line_chart(df_w.set_index("entry_date")["weight_kg"])
