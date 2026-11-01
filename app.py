@@ -1,7 +1,7 @@
 import os
 import json
 import sqlite3
-import random
+import time
 from datetime import datetime, date
 from PIL import Image
 import pandas as pd
@@ -69,9 +69,8 @@ if not api_key:
 
 client = genai.Client(api_key=api_key)
 
-# Modelli con fallback automatico anti-overload
-PRIMARY_MODEL = "gemini-2.5-flash"
-FALLBACK_MODEL = "gemini-2.0-flash"
+# Modelli stabili in ordine di affidabilità
+MODELS_TO_TRY = ["gemini-1.5-flash", "gemini-2.5-flash", "gemini-2.0-flash"]
 
 # --- Calcolo Orario e Pasto Attuale ---
 now = datetime.now()
@@ -147,22 +146,21 @@ if st.sidebar.button("🔄 Reset Manuale Settimana"):
     st.toast("Settimana azzerata!")
     st.rerun()
 
-# --- Proposta di Riserva Locale in caso di server occupato ---
+# --- Proposte di emergenza locali ---
 def generate_offline_suggestions(available_items: list):
     proposals = []
-    sample_items = available_items[:3]
-    for it in sample_items:
+    for it in available_items[:3]:
         cat_name = it["categoria"]
         clean_name = cat_name.split(" - ")[-1]
         proposals.append({
             "title": f"Piatto consigliato: {clean_name}",
             "matched_category": cat_name,
-            "hotel_advice": f"Al buffet componi: {it['descrizione']}. Condisci con solo un filo di olio EVO a crudo ed evita intingoli di cottura.",
+            "hotel_advice": f"Al buffet componi: {it['descrizione']}. Condisci con max 1 cucchiaio olio EVO ed evita intingoli.",
             "why": f"Hai ancora {it['rimaste']} porzione/i rimanente/i da completare questa settimana."
         })
     return {"proposals": proposals}
 
-# --- Chiamata API con Fallback ---
+# --- Chiamata API con retry sequenziale ---
 def get_meal_suggestions(meal_slot: str, available_items: list):
     prompt = f"""
     Sei il nutrizionista dell'utente (metodo Handy Diet Low Carb).
@@ -183,7 +181,7 @@ def get_meal_suggestions(meal_slot: str, available_items: list):
       ]
     }}
     """
-    for m in [PRIMARY_MODEL, FALLBACK_MODEL]:
+    for m in MODELS_TO_TRY:
         try:
             resp = client.models.generate_content(
                 model=m,
@@ -192,8 +190,8 @@ def get_meal_suggestions(meal_slot: str, available_items: list):
             )
             return json.loads(resp.text)
         except Exception:
+            time.sleep(1)
             continue
-    # Se entrambi i modelli sono occupati, genera istantaneamente da logica interna
     return generate_offline_suggestions(available_items)
 
 def evaluate_meal_photo(image: Image.Image, meal_slot: str, chosen_category: str):
@@ -222,7 +220,8 @@ def evaluate_meal_photo(image: Image.Image, meal_slot: str, chosen_category: str
       "fat_g": 16.0
     }}
     """
-    for m in [PRIMARY_MODEL, FALLBACK_MODEL]:
+    last_err = ""
+    for m in MODELS_TO_TRY:
         try:
             resp = client.models.generate_content(
                 model=m,
@@ -230,9 +229,11 @@ def evaluate_meal_photo(image: Image.Image, meal_slot: str, chosen_category: str
                 config={"response_mime_type": "application/json"}
             )
             return json.loads(resp.text)
-        except Exception:
+        except Exception as e:
+            last_err = str(e)
+            time.sleep(1)
             continue
-    raise RuntimeError("I server Gemini sono temporaneamente occupati. Riprova tra 10 secondi.")
+    raise RuntimeError(f"Server temporaneamente carichi. Ultimo tentativo: {last_err}")
 
 # --- Interfaccia ---
 st.title("🥗 Handy Diet Tracker")
