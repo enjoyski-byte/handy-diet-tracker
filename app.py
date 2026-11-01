@@ -118,25 +118,67 @@ conn.commit()
 
 # --- Quote Settimanali Prescritte (The Handy Diet) ---
 WEEKLY_QUOTAS = {
-    # PRANZO
-    "Pranzo - Pasta / Riso (pugno schiacciato)": {"max": 2, "slot": "Pranzo", "desc": "Primo pasta/riso + verdura cotta (1 pugno)"},
-    "Pranzo - Carne / Bistecca / Arrosto (1 mano)": {"max": 2, "slot": "Pranzo", "desc": "Carne ai ferri/arrosto + verdura cruda (1 pugno e mezzo)"},
-    "Pranzo - Salmone / Tonno / Pesce veloce": {"max": 1, "slot": "Pranzo", "desc": "Salmone affumicato 4 fette o tonno in vetro + verdura"},
-    "Pranzo - Uova sode (2 unità)": {"max": 1, "slot": "Pranzo", "desc": "2 uova sode in insalatona mista"},
-    "Pranzo - Zuppa di legumi (1 fondina)": {"max": 1, "slot": "Pranzo", "desc": "Zuppa di legumi (250 ml) + verdura cotta"},
-    
-    # CENA
-    "Cena - Pesce semplice al vapore/ferri (1 mano)": {"max": 2, "slot": "Cena", "desc": "Pesce bianco/orata/merluzzo + verdura mista"},
-    "Cena - Bastoncini / Croccole / Merluzzo erbe": {"max": 1, "slot": "Cena", "desc": "6 bastoncini Findus al forno o croccola ai semi + verdura"},
-    "Cena - Uova strapazzate / tegamino / frittata (2 uova)": {"max": 1, "slot": "Cena", "desc": "2 uova in padella + verdura cruda (1 pugno e mezzo)"},
-    "Cena - Petto di pollo / tacchino ai ferri (1 mano)": {"max": 1, "slot": "Cena", "desc": "Petto di pollo ai ferri (1 mano) + verdura"},
-    "Cena - Minestrone verdure con legumi e patate (500 ml)": {"max": 2, "slot": "Cena", "desc": "1 scodella grande minestrone + 2 dita formaggio stagionato"},
-    "Cena - Pasto Libero settimanale": {"max": 1, "slot": "Cena", "desc": "Pasto libero con moderazione (senza pizza)"},
-    
-    # SPUNTINI & COLAZIONE
-    "Spuntino Pomeridiano - Frutta fresca (1 pugno)": {"max": 7, "slot": "Spuntino", "desc": "1 frutto intero (mela, pera, kiwi)"},
-    "Spuntino Serale - Gallette + Noci/Mandorle o Cioccolato 85%": {"max": 4, "slot": "Spuntino Serale", "desc": "2 gallette norvegesi + 15 mandorle o 2 quadretti fondente 85%"},
-    "Colazione - Gallette/Crackers proteici + Yogurt/Ricotta": {"max": 7, "slot": "Colazione", "desc": "Yogurt o ricotta + gallette/fette e noci"}
+    # COLAZIONE (Totale: 7)
+    "Colazione [5x] - Yogurt Intero + Noci (5) + Fiocchi di Avena (5 cucchiai)": {
+        "max": 5, "slot": "Colazione",
+        "desc": "Yogurt intero (250 ml) + 5 noci secche + 5 cucchiai fiocchi di avena"
+    },
+    "Colazione [2x] - Pane di Segale (1 mano) + Ricotta (125g) + Marmellata Light": {
+        "max": 2, "slot": "Colazione",
+        "desc": "Pane di segale (1 mano) + 1/2 vasetto ricotta (125g) + 3 cucchiaini marmellata Hero Light"
+    },
+
+    # PRANZO (Totale: 7)
+    "Pranzo [2x] - Pasta corta al sugo leggero (1 pugno schiacciato) + Verdura cotta": {
+        "max": 2, "slot": "Pranzo",
+        "desc": "Pasta corta con sugo leggero (1 pugno schiacciato) + verdura cotta condita (1 pugno)"
+    },
+    "Pranzo [2x] - Secondo di Carne (1 mano) + Verdura cotta + 2 Gallette": {
+        "max": 2, "slot": "Pranzo",
+        "desc": "Carne semplice (1 mano) + verdura cotta (1 pugno) + 2 gallette norvegesi"
+    },
+    "Pranzo [2x] - Insalatone con 2 Uova sode + Ortaggi misti + 2 Gallette": {
+        "max": 2, "slot": "Pranzo",
+        "desc": "Insalatone (1.5 pugni cruda + 1 pugno ortaggi) + 2 uova sode + 2 gallette norvegesi"
+    },
+    "Pranzo [1x] - Zuppa di legumi (1 fondina 250ml) + 2 Gallette": {
+        "max": 1, "slot": "Pranzo",
+        "desc": "Zuppa di legumi (250 ml) + 2 gallette norvegesi"
+    },
+
+    # SPUNTINO POMERIDIANO (Totale: 7)
+    "Spuntino [7x] - Frutta fresca di stagione (1 pugno)": {
+        "max": 7, "slot": "Spuntino",
+        "desc": "1 pugno di frutta fresca di stagione"
+    },
+
+    # CENA (Totale: 7)
+    "Cena [2x] - Pesce semplice (1 mano) + Verdura cruda + 6 cucchiai Piselli": {
+        "max": 2, "slot": "Cena",
+        "desc": "Pesce semplice ai ferri/vapore (1 mano) + verdura cruda (1.5 pugni) + 6 cucchiai piselli in padella"
+    },
+    "Cena [2x] - Minestrone (500ml) + Formaggio stagionato (2 dita)": {
+        "max": 2, "slot": "Cena",
+        "desc": "Minestrone con legumi e patate (500 ml) + formaggio stagionato con crosta (2 dita)"
+    },
+    "Cena [1x] - Uova (2 unità tegamino/frittata) + Verdura cruda + 2 Gallette": {
+        "max": 1, "slot": "Cena",
+        "desc": "2 uova al tegamino/strapazzate/frittata + verdura cruda (1.5 pugni) + 2 gallette norvegesi"
+    },
+    "Cena [1x] - Petto di Pollo/Tacchino ai ferri (1 mano) + Verdura cruda + 2 Gallette": {
+        "max": 1, "slot": "Cena",
+        "desc": "Petto di pollo o tacchino ai ferri (1 mano) + verdura cruda (1.5 pugni) + 2 gallette norvegesi"
+    },
+    "Cena [1x] - Pasto Libero con moderazione (senza pizza)": {
+        "max": 1, "slot": "Cena",
+        "desc": "1 pasto libero settimanale con moderazione (evitare la pizza)"
+    },
+
+    # SPUNTINO SERALE (Totale: 4)
+    "Spuntino Serale [4x] - Cioccolato Fondente 85% Perugina Nero (2 quadretti)": {
+        "max": 4, "slot": "Spuntino Serale",
+        "desc": "2 quadretti di cioccolato fondente 85% Perugina Nero"
+    }
 }
 
 consumed_counts = {k: 0 for k in WEEKLY_QUOTAS.keys()}
