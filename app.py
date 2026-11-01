@@ -71,6 +71,9 @@ if not api_key:
 
 client = genai.Client(api_key=api_key)
 
+# Modello Gemini ufficiale aggiornato
+MODEL_NAME = "gemini-3.8-flash"
+
 # --- Calcolo Orario e Pasto Attuale ---
 now = datetime.now()
 hour_float = now.hour + now.minute / 60.0
@@ -88,7 +91,7 @@ elif 22.0 <= hour_float <= 24.0 or hour_float < 2.0:
 else:
     current_slot = "Pranzo"
 
-# Calcolo settimana corrente (es. 2026-W44)
+# Calcolo settimana corrente
 current_week_str = now.strftime("%Y-W%W")
 
 # --- Quote Settimanali Prescritte (The Handy Diet) ---
@@ -175,7 +178,7 @@ def get_meal_suggestions(meal_slot: str, available_items: list):
     }}
     """
     resp = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model=MODEL_NAME,
         contents=prompt,
         config={"response_mime_type": "application/json"}
     )
@@ -209,7 +212,7 @@ def evaluate_meal_photo(image: Image.Image, meal_slot: str, chosen_category: str
     }}
     """
     resp = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model=MODEL_NAME,
         contents=[image, prompt],
         config={"response_mime_type": "application/json"}
     )
