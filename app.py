@@ -278,3 +278,146 @@ with tab_camera:
     
     col_s1, col_s2 = st.columns(2)
     with col_s1:
+        sel_slot = st.selectbox("Pasto:", ["Colazione", "Pranzo", "Spuntino", "Cena", "Spuntino Serale"], index=["Colazione", "Pranzo", "Spuntino", "Cena", "Spuntino Serale"].index(current_slot))
+    with col_s2:
+        cat_choices = [k for k, v in remaining_options.items() if v["slot"] == sel_slot]
+        if not cat_choices:
+            cat_choices = list(WEEKLY_QUOTAS.keys())
+        sel_category = st.selectbox(
+            "Voce della dieta da scalare:",
+            cat_choices,
+            format_func=lambda x: f"{x} (Rimaste: {remaining_options.get(x, {}).get('remaining', 0)}/{remaining_options.get(x, {}).get('max', 0)})"
+        )
+
+    mode = st.radio("Foto da:", ["Fotocamera", "Carica da galleria"], horizontal=True)
+    pic = st.camera_input("Scatta la foto del piatto") if mode == "Fotocamera" else st.file_uploader("Carica file", type=["jpg", "jpeg", "png"])
+
+    if pic:
+        pil_pic = Image.open(pic)
+        st.image(pil_pic, caption="Piatto pronto per l'analisi", use_container_width=True)
+
+        if st.button("⚖️ Analizza e Valuta Piatto", type="primary"):
+            with st.spinner("Valutazione piatto..."):
+                try:
+                    res = evaluate_meal_photo(pil_pic, sel_slot, sel_category)
+                    st.session_state["current_eval"] = res
+                    st.session_state["saved_slot"] = sel_slot
+                    st.session_state["saved_category"] = sel_category
+                except Exception as e:
+                    st.error(f"{e}")
+
+        if "current_eval" in st.session_state:
+            data = st.session_state["current_eval"]
+            score = data.get("compliance_score", 5)
+
+            st.divider()
+            if score >= 8:
+                st.success(f"🎯 **Aderenza al pasto: {score}/10 (Ottimo)**")
+            elif score >= 5:
+                st.warning(f"⚠️ **Aderenza: {score}/10 (Accettabile)**")
+            else:
+                st.error(f"🚨 **Aderenza: {score}/10 (Distante dal piano)**")
+
+            st.write(f"**Verdetto:** {data.get('distance_verdict')}")
+            st.info(f"🏨 **Consiglio hotel:** {data.get('actionable_hotel_tip')}")
+
+            c_ex, c_mis = st.columns(2)
+            with c_ex:
+                st.markdown("**❌ Eccessi:**")
+                for e in data.get("excesses", []):
+                    st.write(f"- {e}")
+            with c_mis:
+                st.markdown("**🥗 Carenze:**")
+                for m in data.get("missing", []):
+                    st.write(f"- {m}")
+
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Kcal", f"{data.get('total_calories')} kcal")
+            m2.metric("Carboidrati", f"{data.get('carbs_g')} g")
+            m3.metric("Proteine", f"{data.get('protein_g')} g")
+            m4.metric("Grassi", f"{data.get('fat_g')} g")
+
+            if st.button("💾 Salva e SCALA dal monte settimanale", type="primary"):
+                cursor.execute("""
+                    INSERT INTO handy_logs (
+                        entry_date, entry_time, week_number, meal_type, category_consumed,
+                        score, plate_summary, calories, carbs_g, protein_g, fat_g, verdict
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    date.today().isoformat(),
+                    datetime.now().strftime("%H:%M"),
+                    current_week_str,
+                    st.session_state.get("saved_slot", sel_slot),
+                    st.session_state.get("saved_category", sel_category),
+                    score,
+                    data.get("plate_summary"),
+                    data.get("total_calories"),
+                    data.get("carbs_g"),
+                    data.get("protein_g"),
+                    data.get("fat_g"),
+                    data.get("distance_verdict")
+                ))
+                conn.commit()
+                st.toast(f"Pasto registrato! Scalato da: {st.session_state.get('saved_category')}")
+                del st.session_state["current_eval"]
+                st.rerun()
+
+with tab_quotas:
+    st.subheader(f"Stato Settimana ({current_week_str})")
+    table_data = []
+    for cat, val in remaining_options.items():
+        table_data.append({
+            "Pasto": val["slot"],
+            "Alimento / Preparazione": cat.split(" - ")[-1],
+            "Fatti": val["used"],
+            "Previsti": val["max"],
+            "Rimanenti": val["remaining"]
+        })
+    df_quotas = pd.DataFrame(table_data)
+    for s_name in ["Colazione", "Pranzo", "Spuntino", "Cena", "Spuntino Serale"]:
+        sub = df_quotas[df_quotas["Pasto"] == s_name]
+        if not sub.empty:
+            st.markdown(f"#### 🍽️ {s_name}")
+            st.dataframe(sub[["Alimento / Preparazione", "Fatti", "Previsti", "Rimanenti"]], hide_index=True)
+
+with tab_weight:
+    st.subheader("⚖️ Diario Peso Corporeo")
+    w1, w2, w3 = st.columns([2, 2, 1.5])
+    with w1:
+        w_date = st.date_input("Data pesata", value=date.today())
+    with w2:
+        w_val = st.number_input("Peso (kg)", min_value=40.0, max_value=160.0, value=80.0, step=0.1, format="%.1f")
+    with w3:
+        st.write("")
+        st.write("")
+        if st.button("💾 Registra Peso", type="primary"):
+            cursor.execute("""
+                INSERT INTO weight_logs (entry_date, weight_kg)
+                VALUES (?, ?)
+                ON CONFLICT(entry_date) DO UPDATE SET weight_kg = excluded.weight_kg
+            """, (w_date.isoformat(), w_val))
+            conn.commit()
+            st.toast(f"Peso {w_val} kg salvato!")
+            st.rerun()
+
+    df_w = pd.read_sql_query("SELECT entry_date, weight_kg FROM weight_logs ORDER BY entry_date ASC", conn)
+    if not df_w.empty:
+        df_w["entry_date"] = pd.to_datetime(df_w["entry_date"])
+        latest_w = df_w.iloc[-1]["weight_kg"]
+        init_w = df_w.iloc[0]["weight_kg"]
+        d_tot = latest_w - init_w
+        d_last = (latest_w - df_w.iloc[-2]["weight_kg"]) if len(df_w) > 1 else 0.0
+
+        st.divider()
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Peso Attuale", f"{latest_w:.1f} kg", delta=f"{d_last:+.1f} kg (vs ultima)" if len(df_w) > 1 else None, delta_color="inverse")
+        k2.metric("Variazione Inizio", f"{d_tot:+.1f} kg", delta_color="inverse")
+        k3.metric("Mancanti al Target", f"{latest_w - target_weight:+.1f} kg", delta=f"Target: {target_weight:.1f} kg")
+
+        if d_last > 0.4:
+            st.warning(f"⚠️ **ATTENZIONE: +{d_last:.1f} kg rispetto all'ultima pesata.**")
+            st.info("💡 Oscillazione legata a ritenzione e sodio. Tieni alte le verdure e limita i carboidrati stasera.")
+        else:
+            st.success("✅ **Andamento regolare verso l'obiettivo.**")
+
+        st.line_chart(df_w.set_index("entry_date")["weight_kg"])
