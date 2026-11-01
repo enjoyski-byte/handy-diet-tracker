@@ -9,7 +9,7 @@ from google import genai
 
 st.set_page_config(page_title="Handy Diet Weekly Planner", page_icon="🥗", layout="centered")
 
-# --- Inizializzazione Database SQLite ---
+# --- Inizializzazione Database SQLite con migrazione sicura ---
 conn = sqlite3.connect("meals.db", check_same_thread=False)
 cursor = conn.cursor()
 
@@ -31,6 +31,15 @@ cursor.execute("""
         verdict TEXT
     )
 """)
+
+# Verifica e aggiunta colonne mancanti se il database era già esistente
+existing_cols = [col[1] for col in cursor.execute("PRAGMA table_info(handy_logs)").fetchall()]
+if "week_number" not in existing_cols:
+    cursor.execute("ALTER TABLE handy_logs ADD COLUMN week_number TEXT")
+if "category_consumed" not in existing_cols:
+    cursor.execute("ALTER TABLE handy_logs ADD COLUMN category_consumed TEXT")
+if "entry_time" not in existing_cols:
+    cursor.execute("ALTER TABLE handy_logs ADD COLUMN entry_time TEXT")
 
 # Tabella controllo peso
 cursor.execute("""
@@ -221,7 +230,6 @@ tab_suggest, tab_camera, tab_quotas, tab_weight = st.tabs([
 with tab_suggest:
     st.subheader(f"Cosa mangiare adesso ({current_slot})")
     
-    # Filtriamo le opzioni valide per questo orario con rimanenza > 0
     slot_available = [
         {"categoria": k, "rimaste": v["remaining"], "massimo": v["max"], "descrizione": v["desc"]}
         for k, v in remaining_options.items()
@@ -258,7 +266,6 @@ with tab_camera:
     with col_s1:
         sel_slot = st.selectbox("Pasto da registrare:", ["Colazione", "Pranzo", "Spuntino", "Cena", "Spuntino Serale"], index=["Colazione", "Pranzo", "Spuntino", "Cena", "Spuntino Serale"].index(current_slot))
     with col_s2:
-        # Mostra le categorie per questo pasto con il conteggio rimanente
         cat_choices = [k for k, v in remaining_options.items() if v["slot"] == sel_slot]
         if not cat_choices:
             cat_choices = list(WEEKLY_QUOTAS.keys())
@@ -358,7 +365,6 @@ with tab_quotas:
 
     df_quotas = pd.DataFrame(table_data)
     
-    # Visualizzazione per pasto
     for s_name in ["Colazione", "Pranzo", "Spuntino", "Cena", "Spuntino Serale"]:
         sub = df_quotas[df_quotas["Pasto"] == s_name]
         if not sub.empty:
