@@ -7,11 +7,13 @@ import pandas as pd
 import streamlit as st
 from google import genai
 
-st.set_page_config(page_title="Handy Diet Hotel Assistant", page_icon="⚖️", layout="centered")
+st.set_page_config(page_title="Handy Diet & Weight Tracker", page_icon="⚖️", layout="centered")
 
-# --- Inizializzazione Database ---
+# --- Inizializzazione Database SQLite ---
 conn = sqlite3.connect("meals.db", check_same_thread=False)
 cursor = conn.cursor()
+
+# Tabella pasti
 cursor.execute("""
     CREATE TABLE IF NOT EXISTS handy_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -26,9 +28,18 @@ cursor.execute("""
         verdict TEXT
     )
 """)
+
+# Tabella peso corporeo
+cursor.execute("""
+    CREATE TABLE IF NOT EXISTS weight_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        entry_date TEXT UNIQUE,
+        weight_kg REAL
+    )
+""")
 conn.commit()
 
-# --- Configurazione API ---
+# --- Configurazione API Gemini ---
 api_key = None
 try:
     if "GEMINI_API_KEY" in st.secrets:
@@ -47,6 +58,10 @@ if not api_key:
     st.stop()
 
 client = genai.Client(api_key=api_key)
+
+# --- Sidebar: Parametri e Obiettivo Peso ---
+st.sidebar.header("🎯 Target & Impostazioni")
+target_weight = st.sidebar.number_input("Obiettivo Peso Corporeo (kg)", min_value=50.0, max_value=150.0, value=75.0, step=0.5)
 
 # --- Profilo Dieta & Prompt Regolatore ---
 DIET_GUIDELINES = """
@@ -102,11 +117,11 @@ def evaluate_meal_against_diet(image: Image.Image, meal_type: str):
     return json.loads(response.text)
 
 # --- Interfaccia Grafica ---
-st.title("🥗 Handy Diet Hotel Assistant")
-st.caption("Controllo aderenza al piano Low Carb per pasti in hotel e al ristorante.")
+st.title("🥗 Handy Diet & Weight Tracker")
 
-tab_check, tab_history = st.tabs(["📸 Verifica Piatto Hotel", "📋 Registro Giornaliero"])
+tab_check, tab_history, tab_weight = st.tabs(["📸 Verifica Piatto Hotel", "📋 Registro Pasti", "⚖️ Controllo Peso"])
 
+# === TAB 1: VERIFICA PIATTO HOTEL ===
 with tab_check:
     meal_type = st.selectbox("Quale pasto stai consumando?", ["Pranzo", "Cena", "Colazione", "Spuntino"])
 
@@ -130,7 +145,6 @@ with tab_check:
             data = st.session_state["handy_eval"]
             score = data.get("compliance_score", 5)
 
-            # Barra voto aderenza
             st.divider()
             if score >= 8:
                 st.success(f"🎯 **Aderenza alla dieta: {score}/10 (Ottimo)**")
@@ -152,7 +166,6 @@ with tab_check:
                 for mis in data.get("missing", []):
                     st.write(f"- {mis}")
 
-            # Macronutrienti stimati
             st.markdown("##### Stima Nutrizionale")
             k1, k2, k3, k4 = st.columns(4)
             k1.metric("Kcal Stimate", f"{data.get('total_calories')} kcal")
@@ -160,7 +173,7 @@ with tab_check:
             k3.metric("Proteine", f"{data.get('protein_g')} g")
             k4.metric("Grassi", f"{data.get('fat_g')} g")
 
-            if st.button("💾 Salva nel diario"):
+            if st.button("💾 Salva pasto nel diario"):
                 cursor.execute("""
                     INSERT INTO handy_logs (entry_date, meal_type, score, plate_summary, calories, carbs_g, protein_g, fat_g, verdict)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -180,16 +193,96 @@ with tab_check:
                 del st.session_state["handy_eval"]
                 st.rerun()
 
+# === TAB 2: REGISTRO PASTI ===
 with tab_history:
     today_str = date.today().isoformat()
-    df = pd.read_sql_query("SELECT entry_date, meal_type, score, plate_summary, calories, carbs_g, protein_g, fat_g FROM handy_logs WHERE entry_date = ?", conn, params=(today_str,))
-    if df.empty:
+    df_meals = pd.read_sql_query("SELECT entry_date, meal_type, score, plate_summary, calories, carbs_g, protein_g, fat_g FROM handy_logs WHERE entry_date = ?", conn, params=(today_str,))
+    if df_meals.empty:
         st.write("Nessun pasto registrato oggi.")
     else:
-        avg_score = df["score"].mean()
+        avg_score = df_meals["score"].mean()
         st.metric("Voto Medio Aderenza Oggi", f"{avg_score:.1f} / 10")
-        st.dataframe(df, hide_index=True)
-        if st.button("Azzera storico oggi"):
+        st.dataframe(df_meals, hide_index=True)
+        if st.button("Azzera storico pasti di oggi"):
             cursor.execute("DELETE FROM handy_logs WHERE entry_date = ?", (today_str,))
             conn.commit()
             st.rerun()
+
+# === TAB 3: CONTROLLO PESO & PROGRESSI ===
+with tab_weight:
+    st.subheader("⚖️ Diario del Peso & Analisi Tendenza")
+    
+    # Inserimento peso
+    w_col1, w_col2, w_col3 = st.columns([2, 2, 1.5])
+    with w_col1:
+        input_date = st.date_input("Data misurazione", value=date.today())
+    with w_col2:
+        new_weight = st.number_input("Peso rilevato (kg)", min_value=40.0, max_value=180.0, value=80.0, step=0.1, format="%.1f")
+    with w_col3:
+        st.write("")
+        st.write("")
+        save_w_btn = st.button("💾 Registra", type="primary")
+
+    if save_w_btn:
+        cursor.execute("""
+            INSERT INTO weight_logs (entry_date, weight_kg)
+            VALUES (?, ?)
+            ON CONFLICT(entry_date) DO UPDATE SET weight_kg = excluded.weight_kg
+        """, (input_date.isoformat(), new_weight))
+        conn.commit()
+        st.toast(f"Peso di {new_weight} kg registrato per il {input_date}!")
+        st.rerun()
+
+    # Lettura storico pesate
+    df_weight = pd.read_sql_query("SELECT entry_date, weight_kg FROM weight_logs ORDER BY entry_date ASC", conn)
+
+    if not df_weight.empty:
+        df_weight["entry_date"] = pd.to_datetime(df_weight["entry_date"])
+        df_weight = df_weight.sort_values("entry_date").reset_index(drop=True)
+
+        latest_weight = df_weight.iloc[-1]["weight_kg"]
+        initial_weight = df_weight.iloc[0]["weight_kg"]
+        delta_total = latest_weight - initial_weight
+        delta_target = latest_weight - target_weight
+
+        # Calcolo variazione dall'ultima pesata
+        if len(df_weight) > 1:
+            prev_weight = df_weight.iloc[-2]["weight_kg"]
+            delta_last = latest_weight - prev_weight
+        else:
+            delta_last = 0.0
+
+        # KPI metriche
+        st.divider()
+        m_col1, m_col2, m_col3 = st.columns(3)
+        m_col1.metric("Peso Attuale", f"{latest_weight:.1f} kg", delta=f"{delta_last:+.1f} kg (vs ultima)" if len(df_weight) > 1 else None, delta_color="inverse")
+        m_col2.metric("Variazione Totale", f"{delta_total:+.1f} kg", delta_color="inverse")
+        m_col3.metric("Mancanti all'Obiettivo", f"{delta_target:+.1f} kg", delta=f"Target: {target_weight:.1f} kg")
+
+        # --- SISTEMA ALERT DI PEGGIORAMENTO ---
+        if delta_last > 0.4:
+            st.warning(f"⚠️ **ATTENZIONE - AUMENTO RILEVATO (+{delta_last:.1f} kg rispetto all'ultima pesata)**")
+            st.info("💡 **Consiglio clinico Handy Diet:** Ricorda che le variazioni giornaliere repentine dipendono spesso da ritenzione idrica o sodio dei pasti fuori casa. Non abbatterti: mantieni rigorosa la quota proteica a '1 mano', aumenta le verdure crude ed evita il pane al buffet stasera.")
+        elif delta_total > 1.0 and len(df_weight) >= 3:
+            st.error(f"🚨 **ALLERTA TENDENZA NEGATIVA: Sei a +{delta_total:.1f} kg dall'inizio del percorso.**")
+            st.write("Verifica se negli ultimi giorni in hotel ci sono stati carboidrati non calcolati a cena, condimenti nascosti o porzioni proteiche oltre la misura.")
+        else:
+            st.success("✅ **Tendenza sotto controllo:** Stai procedendo verso l'obiettivo. Ricorda che 2 kg al mese rappresentano il ritmo ideale per un calo di peso sano e sostenibile.")
+
+        # --- GRAFICO ANDAMENTO ---
+        st.markdown("#### Curva di Andamento del Peso")
+        # Prepariamo un dataframe pulito per il grafico
+        chart_df = df_weight.set_index("entry_date")[["weight_kg"]]
+        chart_df["Target"] = target_weight
+        st.line_chart(chart_df)
+
+        # Tabella Storico con opzione cancellazione
+        with st.expander("Visualizza o elimina registrazioni passate"):
+            st.dataframe(df_weight.sort_values("entry_date", ascending=False), hide_index=True)
+            del_date = st.selectbox("Seleziona data da rimuovere", df_weight["entry_date"].dt.strftime("%Y-%m-%d"))
+            if st.button("Elimina pesata selezionata"):
+                cursor.execute("DELETE FROM weight_logs WHERE entry_date = ?", (del_date,))
+                conn.commit()
+                st.rerun()
+    else:
+        st.info("Non hai ancora registrato nessuna pesata. Inserisci il peso di oggi per iniziare il tracciamento.")
