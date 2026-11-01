@@ -10,7 +10,7 @@ from google import genai
 
 st.set_page_config(page_title="Handy Diet Weekly Planner", page_icon="🥗", layout="centered")
 
-# --- Inizializzazione Database SQLite ---
+# --- Inizializzazione Database SQLite Permanente ---
 conn = sqlite3.connect("meals.db", check_same_thread=False)
 cursor = conn.cursor()
 
@@ -46,7 +46,29 @@ cursor.execute("""
     )
 """)
 
-# Tabella idratazione e tipologie di caffè
+# Inserimento storico pesate (Giugno - Ottobre 2026)
+historical_weights = [
+    ("2026-06-12", 66.05),
+    ("2026-06-22", 66.55),
+    ("2026-07-09", 67.80),
+    ("2026-07-13", 67.10),
+    ("2026-07-16", 67.90),
+    ("2026-07-22", 67.15),
+    ("2026-07-23", 67.55),
+    ("2026-07-31", 67.25),
+    ("2026-08-01", 67.15),
+    ("2026-09-03", 69.45),
+    ("2026-09-04", 69.90),
+    ("2026-09-19", 69.40),
+    ("2026-10-03", 70.40),
+    ("2026-10-10", 70.50),
+]
+for entry_d, weight_val in historical_weights:
+    cursor.execute("""
+        INSERT OR IGNORE INTO weight_logs (entry_date, weight_kg)
+        VALUES (?, ?)
+    """, (entry_d, weight_val))
+
 cursor.execute("""
     CREATE TABLE IF NOT EXISTS hydration_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,8 +87,6 @@ for col_name in ["coffee_espresso", "coffee_lungo", "coffee_americano"]:
         cursor.execute(f"ALTER TABLE hydration_logs ADD COLUMN {col_name} INTEGER DEFAULT 0")
 
 conn.commit()
-
-# Cartella per archiviare le foto dei pasti
 os.makedirs("meal_images", exist_ok=True)
 
 # --- Configurazione Chiave API Gemini ---
@@ -88,9 +108,9 @@ if not api_key:
     st.stop()
 
 client = genai.Client(api_key=api_key)
-ACTIVE_MODEL = "gemini-3.8-flash"
+ACTIVE_MODEL = "gemini-2.5-flash"
 
-# --- Calcolo Orario e Pasto Attuale ---
+# --- Orario e Pasto Attuale ---
 now = datetime.now()
 hour_float = now.hour + now.minute / 60.0
 
@@ -116,7 +136,7 @@ cursor.execute("""
 """, (today_str,))
 conn.commit()
 
-# --- Quote Settimanali Prescritte (The Handy Diet) ---
+# --- Quote Settimanali Esatte (Handy Diet Dr. Sculati) ---
 WEEKLY_QUOTAS = {
     # COLAZIONE (Totale: 7)
     "Colazione [5x] - Yogurt Intero + Noci (5) + Fiocchi di Avena (5 cucchiai)": {
@@ -181,6 +201,7 @@ WEEKLY_QUOTAS = {
     }
 }
 
+# Conteggio per la settimana in corso
 consumed_counts = {k: 0 for k in WEEKLY_QUOTAS.keys()}
 rows = cursor.execute("SELECT category_consumed FROM handy_logs WHERE week_number = ?", (current_week_str,)).fetchall()
 for r in rows:
@@ -201,104 +222,62 @@ for cat, meta in WEEKLY_QUOTAS.items():
 
 # --- Sidebar ---
 st.sidebar.header("🎯 Impostazioni")
-target_weight = st.sidebar.number_input("Target Peso Corporeo (kg)", min_value=50.0, max_value=150.0, value=75.0, step=0.5)
+target_weight = st.sidebar.number_input("Target Peso Corporeo (kg)", min_value=50.0, max_value=100.0, value=66.5, step=0.1)
 target_water_l = st.sidebar.number_input("Target Acqua/Tisane (Litri)", min_value=1.5, max_value=5.0, value=2.5, step=0.1)
 
 st.sidebar.divider()
 st.sidebar.markdown(f"**Settimana attiva:** `{current_week_str}`")
-st.sidebar.caption("Il monte alimenti si resetta automaticamente alla fine della domenica sera.")
-if st.sidebar.button("🔄 Reset Manuale Settimana"):
-    cursor.execute("DELETE FROM handy_logs WHERE week_number = ?", (current_week_str,))
-    conn.commit()
-    st.toast("Settimana azzerata!")
-    st.rerun()
+st.sidebar.caption("I dati storici restano memorizzati per sempre. La nuova settimana riparte con il conteggio a 0 per le quote.")
 
-# Proposta locale di emergenza
 def generate_offline_suggestions(available_items: list):
     proposals = []
     for it in available_items[:3]:
         cat_name = it["categoria"]
         clean_name = cat_name.split(" - ")[-1]
         proposals.append({
-            "title": f"Piatto consigliato: {clean_name}",
+            "title": f"Consigliato: {clean_name}",
             "matched_category": cat_name,
-            "hotel_advice": f"Al buffet componi: {it['descrizione']}. Condisci con max 1 cucchiaio olio EVO ed evita intingoli.",
-            "why": f"Hai ancora {it['rimaste']} porzione/i rimanente/i da completare questa settimana."
+            "hotel_advice": f"Al buffet prepara: {it['descrizione']}.",
+            "why": f"Hai ancora {it['rimaste']} porzione/i rimanente/i su {it['massimo']} previste."
         })
     return {"proposals": proposals}
 
 def get_meal_suggestions(meal_slot: str, available_items: list):
     prompt = f"""
-    Sei il nutrizionista dell'utente (metodo Handy Diet Low Carb).
-    È il momento del pasto: **{meal_slot}**.
-    L'utente è in albergo/ristorante. Opzioni DISPONIBILI per {meal_slot}:
+    Sei il nutrizionista dell'utente (metodo Handy Diet del Dr. Michele Sculati).
+    È l'orario di: **{meal_slot}**.
+    L'utente è in albergo/ristorante.
+    Ecco le quote e le opzioni DISPONIBILI per {meal_slot} questa settimana:
     {json.dumps(available_items, ensure_ascii=False, indent=2)}
 
-    Genera 3 proposte pratiche per chi mangia al ristorante/buffet, usando SOLO le opzioni sopra.
-    Rispondi esclusivamente con questo formato JSON:
+    Genera 3 proposte pratiche per comporre il piatto al buffet o ristorante usando ESCLUSIVAMENTE le categorie rimaste sopra.
+    Per ogni proposta specifica:
+    - Titolo chiaro
+    - Categoria esatta associata
+    - Istruzioni pratiche per l'albergo (misure a mano, pugno, dita)
+    - Motivazione
+
+    Rispondi solo ed esclusivamente in formato JSON:
     {{
       "proposals": [
         {{
           "title": "Titolo proposta",
           "matched_category": "Nome esatto della categoria rimasta",
-          "hotel_advice": "Istruzioni per il buffet (es. 1 mano di pesce al vapore + verdura mista a crudo)",
+          "hotel_advice": "Istruzioni per il buffet",
           "why": "Motivazione"
         }}
       ]
     }}
     """
-    for _ in range(2):
-        try:
-            resp = client.models.generate_content(
-                model=ACTIVE_MODEL,
-                contents=prompt,
-                config={"response_mime_type": "application/json"}
-            )
-            return json.loads(resp.text)
-        except Exception:
-            time.sleep(1)
-    return generate_offline_suggestions(available_items)
-
-def evaluate_meal_photo(image: Image.Image, meal_slot: str, chosen_category: str):
-    prompt = f"""
-    Sei il nutrizionista personale dell'utente (metodo Handy Diet Low Carb).
-    Pasto in corso: {meal_slot}.
-    Categoria selezionata: {chosen_category}.
-    
-    Analizza la foto del pasto scattata in hotel:
-    1. Verifica proporzioni handy diet (1 mano di proteine, verdura a pugno, assenza di pane comune/fritti/dolci).
-    2. Se l'utente mostra frutta secca (es. noci o mandorle), conta o stima il numero di pezzi rispetto alla prescrizione (5 noci o 15 mandorle).
-    3. Calcola calorie e macro stimati.
-    4. Assegna un voto di conformità da 1 a 10.
-    5. Fornisci un consiglio immediato per l'albergo.
-
-    Rispondi RIGOROSAMENTE con questo formato JSON:
-    {{
-      "plate_summary": "Descrizione del cibo nel piatto o nella mano",
-      "compliance_score": 9,
-      "distance_verdict": "Sintesi scostamento rispetto al piano",
-      "actionable_hotel_tip": "Consiglio pratico per l'albergo",
-      "excesses": ["cosa c'è di troppo"],
-      "missing": ["cosa manca"],
-      "total_calories": 180,
-      "carbs_g": 3.0,
-      "protein_g": 4.0,
-      "fat_g": 18.0
-    }}
-    """
-    last_err = ""
-    for _ in range(2):
-        try:
-            resp = client.models.generate_content(
-                model=ACTIVE_MODEL,
-                contents=[image, prompt],
-                config={"response_mime_type": "application/json"}
-            )
-            return json.loads(resp.text)
-        except Exception as e:
-            last_err = str(e)
-            time.sleep(1)
-    raise RuntimeError(f"Server Gemini occupati. Dettaglio: {last_err}")
+    try:
+        resp = client.models.generate_content(
+            model=ACTIVE_MODEL,
+            contents=prompt,
+            config={"response_mime_type": "application/json"}
+        )
+        return json.loads(resp.text)
+    except Exception:
+        return generate_offline_suggestions(available_items)
 
 # --- Interfaccia ---
 st.title("🥗 Handy Diet Tracker")
@@ -322,11 +301,11 @@ with tab_suggest:
     ]
 
     if not slot_available:
-        st.warning(f"⚠️ Hai già completato tutti i piatti previsti per **{current_slot}**!")
+        st.warning(f"⚠️ Hai già completato tutti i pasti previsti per **{current_slot}** questa settimana!")
     else:
         st.markdown(f"Hai ancora **{len(slot_available)} opzioni disponibili** per questo pasto.")
         if st.button("✨ Fatti suggerire 3 piatti da Gemini", type="primary"):
-            with st.spinner("Calcolo proposte..."):
+            with st.spinner("Calcolo proposte in base alle quote rimanenti..."):
                 sugg = get_meal_suggestions(current_slot, slot_available)
                 st.session_state["suggestions"] = sugg.get("proposals", [])
 
@@ -357,135 +336,67 @@ with tab_register:
         )
 
     st.markdown("---")
-    input_method = st.radio("Metodo di registrazione:", ["✍️ Inserimento a mano (+ Foto facoltativa per ricordo)", "📸 Analisi automatica foto con IA"], horizontal=True)
+    meal_desc = st.text_input("Descrivi cosa hai mangiato:", placeholder="Es. Yogurt intero con 5 noci e 5 cucchiai avena")
 
-    if input_method == "✍️ Inserimento a mano (+ Foto facoltativa per ricordo)":
-        meal_desc = st.text_input("Descrivi cosa hai mangiato:", placeholder="Es. 5 noci e acqua oppure 1 trancio di orata con zucchine")
+    st.caption("📷 Vuoi allegare una foto per verifica e ricordo? (Opzionale)")
+    photo_sub = st.radio("Sorgente foto:", ["Nessuna foto", "Scatta foto", "Carica da galleria"], horizontal=True)
+    img_file = None
+    if photo_sub == "Scatta foto":
+        img_file = st.camera_input("Scatta per il diario")
+    elif photo_sub == "Carica da galleria":
+        img_file = st.file_uploader("Scegli immagine", type=["jpg", "jpeg", "png"])
+
+    if img_file:
+        st.image(Image.open(img_file), caption="Foto piatto", use_container_width=True)
+
+    col_m1, col_m2 = st.columns(2)
+    with col_m1:
+        manual_kcal = st.number_input("Calorie stimate (kcal)", min_value=0, max_value=2500, value=250, step=10)
+    with col_m2:
+        manual_score = st.slider("Voto aderenza alla dieta (1-10)", min_value=1, max_value=10, value=9)
+
+    if st.button("💾 Salva e Scala Subito", type="primary"):
+        if not meal_desc.strip():
+            meal_desc = sel_category.split(" - ")[-1]
         
-        st.caption("📷 Vuoi scattare o caricare la foto del pasto per archiviarla? (Opzionale)")
-        photo_sub = st.radio("Sorgente foto:", ["Nessuna foto", "Scatta foto", "Carica da galleria"], horizontal=True)
-        img_file = None
-        if photo_sub == "Scatta foto":
-            img_file = st.camera_input("Scatta per il diario")
-        elif photo_sub == "Carica da galleria":
-            img_file = st.file_uploader("Scegli immagine", type=["jpg", "jpeg", "png"])
-
+        saved_img_path = None
         if img_file:
-            st.image(Image.open(img_file), caption="Foto salvata per il diario", use_container_width=True)
+            timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+            saved_img_path = f"meal_images/{timestamp_str}.jpg"
+            Image.open(img_file).save(saved_img_path)
 
-        col_m1, col_m2 = st.columns(2)
-        with col_m1:
-            manual_kcal = st.number_input("Calorie stimate (kcal)", min_value=0, max_value=2500, value=200, step=10)
-        with col_m2:
-            manual_score = st.slider("Voto aderenza alla dieta (1-10)", min_value=1, max_value=10, value=9)
+        cursor.execute("""
+            INSERT INTO handy_logs (
+                entry_date, entry_time, week_number, meal_type, category_consumed,
+                score, plate_summary, calories, carbs_g, protein_g, fat_g, verdict, image_path
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            date.today().isoformat(),
+            datetime.now().strftime("%H:%M"),
+            current_week_str,
+            sel_slot,
+            sel_category,
+            manual_score,
+            meal_desc,
+            manual_kcal,
+            10.0,
+            15.0,
+            10.0,
+            "Registrato",
+            saved_img_path
+        ))
+        conn.commit()
+        st.toast(f"Pasto registrato! Scalata 1 quota da: {sel_category}")
+        st.rerun()
 
-        if st.button("💾 Salva e Scala Subito", type="primary"):
-            if not meal_desc.strip():
-                meal_desc = sel_category.split(" - ")[-1]
-            
-            saved_img_path = None
-            if img_file:
-                timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-                saved_img_path = f"meal_images/{timestamp_str}.jpg"
-                Image.open(img_file).save(saved_img_path)
-
-            cursor.execute("""
-                INSERT INTO handy_logs (
-                    entry_date, entry_time, week_number, meal_type, category_consumed,
-                    score, plate_summary, calories, carbs_g, protein_g, fat_g, verdict, image_path
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                date.today().isoformat(),
-                datetime.now().strftime("%H:%M"),
-                current_week_str,
-                sel_slot,
-                sel_category,
-                manual_score,
-                meal_desc,
-                manual_kcal,
-                10.0,
-                15.0,
-                10.0,
-                "Registrato a mano",
-                saved_img_path
-            ))
-            conn.commit()
-            st.toast(f"Pasto registrato con successo! Scalata 1 quota da: {sel_category}")
-            st.rerun()
-
-    else:
-        mode_cam = st.radio("Foto da:", ["Fotocamera", "Carica da galleria"], horizontal=True)
-        pic = st.camera_input("Inquadra il piatto") if mode_cam == "Fotocamera" else st.file_uploader("Carica file", type=["jpg", "jpeg", "png"])
-
-        if pic:
-            pil_pic = Image.open(pic)
-            st.image(pil_pic, caption="Piatto pronto per l'analisi", use_container_width=True)
-
-            if st.button("⚖️ Analizza con IA", type="primary"):
-                with st.spinner("Valutazione piatto con Gemini..."):
-                    try:
-                        res = evaluate_meal_photo(pil_pic, sel_slot, sel_category)
-                        st.session_state["current_eval"] = res
-                        st.session_state["saved_slot"] = sel_slot
-                        st.session_state["saved_category"] = sel_category
-                        st.session_state["temp_img"] = pil_pic
-                    except Exception as e:
-                        st.error(f"Errore IA: {e}")
-
-            if "current_eval" in st.session_state:
-                data = st.session_state["current_eval"]
-                score = data.get("compliance_score", 5)
-
-                st.divider()
-                st.write(f"**Verdetto:** {data.get('distance_verdict')}")
-                st.info(f"🏨 **Consiglio hotel:** {data.get('actionable_hotel_tip')}")
-
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Kcal", f"{data.get('total_calories')} kcal")
-                m2.metric("Carboidrati", f"{data.get('carbs_g')} g")
-                m3.metric("Proteine", f"{data.get('protein_g')} g")
-                m4.metric("Grassi", f"{data.get('fat_g')} g")
-
-                if st.button("💾 Conferma e SCALA dal monte settimanale"):
-                    saved_path = None
-                    if "temp_img" in st.session_state:
-                        timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        saved_path = f"meal_images/{timestamp_str}.jpg"
-                        st.session_state["temp_img"].save(saved_path)
-
-                    cursor.execute("""
-                        INSERT INTO handy_logs (
-                            entry_date, entry_time, week_number, meal_type, category_consumed,
-                            score, plate_summary, calories, carbs_g, protein_g, fat_g, verdict, image_path
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        date.today().isoformat(),
-                        datetime.now().strftime("%H:%M"),
-                        current_week_str,
-                        st.session_state.get("saved_slot", sel_slot),
-                        st.session_state.get("saved_category", sel_category),
-                        score,
-                        data.get("plate_summary"),
-                        data.get("total_calories"),
-                        data.get("carbs_g"),
-                        data.get("protein_g"),
-                        data.get("fat_g"),
-                        data.get("distance_verdict"),
-                        saved_path
-                    ))
-                    conn.commit()
-                    st.toast(f"Pasto registrato! Scalato da: {st.session_state.get('saved_category')}")
-                    del st.session_state["current_eval"]
-                    st.rerun()
-
-# === TAB 3: MONTE SETTIMANALE ===
+# === TAB 3: MONTE SETTIMANALE & ARCHIVIO PERMANENTE ===
 with tab_quotas:
-    st.subheader(f"Stato Settimana ({current_week_str})")
+    st.subheader(f"Stato Settimana Attuale ({current_week_str})")
     table_data = []
     for cat, val in remaining_options.items():
         table_data.append({
             "Pasto": val["slot"],
-            "Alimento / Preparazione": cat.split(" - ")[-1],
+            "Opzione Prescritta": cat.replace(f"{val['slot']} ", ""),
             "Fatti": val["used"],
             "Previsti": val["max"],
             "Rimanenti": val["remaining"]
@@ -495,26 +406,25 @@ with tab_quotas:
         sub = df_quotas[df_quotas["Pasto"] == s_name]
         if not sub.empty:
             st.markdown(f"#### 🍽️ {s_name}")
-            st.dataframe(sub[["Alimento / Preparazione", "Fatti", "Previsti", "Rimanenti"]], hide_index=True)
+            st.dataframe(sub[["Opzione Prescritta", "Fatti", "Previsti", "Rimanenti"]], hide_index=True)
 
     st.divider()
-    st.subheader("Diario dei Pasti con Foto Salvate")
+    st.subheader("Archivio Storico Pasti (Non si azzera)")
     past_meals = cursor.execute(
-        "SELECT entry_date, entry_time, meal_type, category_consumed, plate_summary, score, calories, image_path FROM handy_logs WHERE week_number = ? ORDER BY id DESC",
-        (current_week_str,)
+        "SELECT entry_date, entry_time, week_number, meal_type, category_consumed, plate_summary, score, calories, image_path FROM handy_logs ORDER BY id DESC"
     ).fetchall()
 
     if not past_meals:
-        st.write("Nessun pasto registrato questa settimana.")
+        st.write("Nessun pasto registrato finora.")
     else:
         for row in past_meals:
-            p_date, p_time, p_slot, p_cat, p_summary, p_score, p_kcal, p_img = row
-            with st.expander(f"🕒 {p_date} {p_time} - {p_slot}: {p_summary} (Voto: {p_score}/10 | {p_kcal} kcal)"):
-                st.write(f"**Categoria scalata:** `{p_cat}`")
+            p_date, p_time, p_week, p_slot, p_cat, p_summary, p_score, p_kcal, p_img = row
+            with st.expander(f"🕒 {p_date} {p_time} ({p_week}) - {p_slot}: {p_summary} (Voto: {p_score}/10 | {p_kcal} kcal)"):
+                st.write(f"**Categoria associata:** `{p_cat}`")
                 if p_img and os.path.exists(p_img):
                     st.image(p_img, caption="Foto registrata", width=300)
 
-# === TAB 4: IDRATAZIONE (ACQUA, TISANE & CAFFÈ SPECIFICI) ===
+# === TAB 4: IDRATAZIONE ===
 with tab_water:
     st.subheader("💧 Monitor Idratazione & Caffè di Oggi")
     
@@ -534,15 +444,15 @@ with tab_water:
     progress_water = min(1.0, current_water_l / target_water_l)
 
     c_w1, c_w2, c_w3 = st.columns(3)
-    c_w1.metric("Acqua / Tisane Bevute", f"{current_water_l:.2f} L", delta=f"{current_water_ml} ml")
+    c_w1.metric("Acqua / Tisane", f"{current_water_l:.2f} L", delta=f"{current_water_ml} ml")
     c_w2.metric("Mancanti al Target", f"{remaining_water_l:.2f} L", delta=f"Target: {target_water_l:.1f} L")
-    c_w3.metric("Totale Caffè Oggi", f"{current_coffee} ☕")
+    c_w3.metric("Totale Caffè", f"{current_coffee} ☕")
 
     st.progress(progress_water)
     if current_water_l >= target_water_l:
-        st.success(f"🎉 **Obiettivo idratazione raggiunto!** Hai superato i {target_water_l} litri oggi.")
+        st.success(f"🎉 **Target raggiunto!** Hai superato i {target_water_l} litri.")
     else:
-        st.info(f"💡 Per raggiungere il target ti mancano circa **{int(remaining_water_l * 1000 / 250)} bicchieri** da 250 ml.")
+        st.info(f"💡 Mancano circa **{int(remaining_water_l * 1000 / 250)} bicchieri** da 250 ml.")
 
     st.markdown("#### Aggiungi Liquidi")
     btn_col1, btn_col2, btn_col3 = st.columns(3)
@@ -552,12 +462,12 @@ with tab_water:
             conn.commit()
             st.rerun()
     with btn_col2:
-        if st.button("🫖 +1 Tazza Tisana (250 ml)", use_container_width=True):
+        if st.button("🫖 +1 Tisana (250 ml)", use_container_width=True):
             cursor.execute("UPDATE hydration_logs SET water_ml = water_ml + 250 WHERE entry_date = ?", (today_str,))
             conn.commit()
             st.rerun()
     with btn_col3:
-        if st.button("🧴 +1 Bottiglia / Borraccia (500 ml)", use_container_width=True):
+        if st.button("🧴 +1 Borraccia (500 ml)", use_container_width=True):
             cursor.execute("UPDATE hydration_logs SET water_ml = water_ml + 500 WHERE entry_date = ?", (today_str,))
             conn.commit()
             st.rerun()
@@ -565,7 +475,6 @@ with tab_water:
     st.markdown("---")
     st.markdown("#### Registro Tipologia Caffè")
 
-    # Colonne per registrare Espresso, Lungo, Americano
     k_col1, k_col2, k_col3 = st.columns(3)
     with k_col1:
         st.metric("Espresso", f"{current_espresso}")
@@ -610,7 +519,6 @@ with tab_water:
     with k_col3:
         st.metric("Americano", f"{current_americano}")
         if st.button("☕ +1 Americano", use_container_width=True, type="primary"):
-            # L'americano aggiunge anche circa 150ml di acqua all'idratazione
             cursor.execute("""
                 UPDATE hydration_logs 
                 SET coffee_americano = coffee_americano + 1, coffee_count = coffee_count + 1, water_ml = water_ml + 150 
@@ -628,29 +536,15 @@ with tab_water:
                 conn.commit()
                 st.rerun()
 
-    with st.expander("Modifica manuale o azzera idratazione di oggi"):
-        man_ml = st.number_input("Imposta ml acqua totali oggi", min_value=0, max_value=8000, value=current_water_ml, step=100)
-        man_esp = st.number_input("Espresso", min_value=0, max_value=20, value=current_espresso, step=1)
-        man_lng = st.number_input("Lungo", min_value=0, max_value=20, value=current_lungo, step=1)
-        man_amr = st.number_input("Americano", min_value=0, max_value=20, value=current_americano, step=1)
-        if st.button("Aggiorna valori manuali"):
-            man_tot_caf = man_esp + man_lng + man_amr
-            cursor.execute("""
-                UPDATE hydration_logs 
-                SET water_ml = ?, coffee_count = ?, coffee_espresso = ?, coffee_lungo = ?, coffee_americano = ? 
-                WHERE entry_date = ?
-            """, (man_ml, man_tot_caf, man_esp, man_lng, man_amr, today_str))
-            conn.commit()
-            st.rerun()
-
-# === TAB 5: CONTROLLO PESO ===
+# === TAB 5: CONTROLLO PESO CON TUTTO LO STORICO ===
 with tab_weight:
-    st.subheader("⚖️ Diario Peso Corporeo")
+    st.subheader("⚖️ Diario Peso Corporeo & Andamento Storico")
+    
     w1, w2, w3 = st.columns([2, 2, 1.5])
     with w1:
         w_date = st.date_input("Data pesata", value=date.today())
     with w2:
-        w_val = st.number_input("Peso (kg)", min_value=40.0, max_value=160.0, value=80.0, step=0.1, format="%.1f")
+        w_val = st.number_input("Peso (kg)", min_value=40.0, max_value=160.0, value=70.0, step=0.05, format="%.2f")
     with w3:
         st.write("")
         st.write("")
@@ -668,20 +562,29 @@ with tab_weight:
     if not df_w.empty:
         df_w["entry_date"] = pd.to_datetime(df_w["entry_date"])
         latest_w = df_w.iloc[-1]["weight_kg"]
-        init_w = df_w.iloc[0]["weight_kg"]
-        d_tot = latest_w - init_w
-        d_last = (latest_w - df_w.iloc[-2]["weight_kg"]) if len(df_w) > 1 else 0.0
+        min_historical = df_w["weight_kg"].min()
+        latest_date_str = df_w.iloc[-1]["entry_date"].strftime("%d/%m/%Y")
+        
+        # Ultima variazione
+        if len(df_w) > 1:
+            prev_w = df_w.iloc[-2]["weight_kg"]
+            d_last = latest_w - prev_w
+        else:
+            d_last = 0.0
 
         st.divider()
         k1, k2, k3 = st.columns(3)
-        k1.metric("Peso Attuale", f"{latest_w:.1f} kg", delta=f"{d_last:+.1f} kg (vs ultima)" if len(df_w) > 1 else None, delta_color="inverse")
-        k2.metric("Variazione Inizio", f"{d_tot:+.1f} kg", delta_color="inverse")
-        k3.metric("Mancanti al Target", f"{latest_w - target_weight:+.1f} kg", delta=f"Target: {target_weight:.1f} kg")
+        k1.metric("Ultimo Peso Rilevato", f"{latest_w:.2f} kg", delta=f"{d_last:+.2f} kg (vs prec)" if len(df_w) > 1 else None, delta_color="inverse")
+        k2.metric("Minimo Storico Raggiunto", f"{min_historical:.2f} kg")
+        k3.metric("Mancanti al Target", f"{latest_w - target_weight:+.2f} kg", delta=f"Target: {target_weight:.1f} kg")
 
-        if d_last > 0.4:
-            st.warning(f"⚠️ **ATTENZIONE: +{d_last:.1f} kg rispetto all'ultima pesata.**")
-            st.info("💡 Oscillazione legata a ritenzione e sodio. Tieni alte le verdure, bevi i tuoi 2.5L di acqua e limita i carboidrati stasera.")
-        else:
-            st.success("✅ **Andamento regolare verso l'obiettivo.**")
+        if latest_w > 70.0:
+            st.warning(f"⚠️ **Attenzione al trend:** Il peso si trova a {latest_w:.2f} kg rispetto al minimo estivo di {min_historical:.2f} kg (+{latest_w - min_historical:.2f} kg). Seguire scrupolosamente le quote della Handy Diet riporterà il trend verso il target sostenibile di -2 kg al mese.")
 
-        st.line_chart(df_w.set_index("entry_date")["weight_kg"])
+        st.markdown("#### Grafico dell'Andamento del Peso (Giugno - Oggi)")
+        chart_df = df_w.set_index("entry_date")[["weight_kg"]]
+        chart_df["Target"] = target_weight
+        st.line_chart(chart_df)
+
+        with st.expander("Visualizza storico completo di tutte le pesate"):
+            st.dataframe(df_w.sort_values("entry_date", ascending=False), hide_index=True)
