@@ -46,7 +46,7 @@ cursor.execute("""
     )
 """)
 
-# Inserimento storico pesate (Giugno - Ottobre 2026)
+# Inserimento storico pesate di base
 historical_weights = [
     ("2026-06-12", 66.05),
     ("2026-06-22", 66.55),
@@ -81,6 +81,7 @@ cursor.execute("""
     )
 """)
 
+# Aggiornamento colonne idratazione senza cancellare dati preesistenti
 existing_hyd_cols = [col[1] for col in cursor.execute("PRAGMA table_info(hydration_logs)").fetchall()]
 if "water_cl" not in existing_hyd_cols:
     cursor.execute("ALTER TABLE hydration_logs ADD COLUMN water_cl REAL DEFAULT 0")
@@ -89,6 +90,14 @@ if "tea_cl" not in existing_hyd_cols:
 for col_name in ["coffee_espresso", "coffee_lungo", "coffee_americano"]:
     if col_name not in existing_hyd_cols:
         cursor.execute(f"ALTER TABLE hydration_logs ADD COLUMN {col_name} INTEGER DEFAULT 0")
+
+# Migra in automatico i vecchi ml in cl (es. 250 ml -> 25 cl)
+if "water_ml" in existing_hyd_cols:
+    cursor.execute("""
+        UPDATE hydration_logs 
+        SET water_cl = ROUND(water_ml / 10.0, 1) 
+        WHERE (water_cl IS NULL OR water_cl = 0) AND water_ml > 0
+    """)
 
 conn.commit()
 os.makedirs("meal_images", exist_ok=True)
@@ -205,7 +214,7 @@ WEEKLY_QUOTAS = {
     }
 }
 
-# Conteggio per la settimana in corso
+# Conteggio pasti per la settimana in corso
 consumed_counts = {k: 0 for k in WEEKLY_QUOTAS.keys()}
 rows = cursor.execute("SELECT category_consumed FROM handy_logs WHERE week_number = ?", (current_week_str,)).fetchall()
 for r in rows:
@@ -234,7 +243,11 @@ target_water_cl = st.sidebar.number_input("Target Acqua / Tisane (cl)", min_valu
 st.sidebar.divider()
 st.sidebar.markdown(f"**Settimana attiva:** `{current_week_str}`")
 
-# Calcolo Voto Settimanale Automatico
+# Conta totale pasti nel DB (per sicurezza)
+total_stored_meals = cursor.execute("SELECT count(*) FROM handy_logs").fetchone()[0]
+st.sidebar.caption(f"📁 Pasti archiviati nel database: **{total_stored_meals}**")
+
+# Calcolo Voto Settimanale Automatico (1-10)
 week_meals = cursor.execute(
     "SELECT score, calories, category_consumed FROM handy_logs WHERE week_number = ?", 
     (current_week_str,)
@@ -243,14 +256,11 @@ week_meals = cursor.execute(
 if week_meals:
     scores = [m[0] for m in week_meals if m[0] is not None]
     avg_score = sum(scores) / len(scores) if scores else 8.0
-    
-    # Penalità se si superano le quote massime prescritte
     penalties = 0
     for cat_name, cnt in consumed_counts.items():
         quota_max = WEEKLY_QUOTAS[cat_name]["max"]
         if cnt > quota_max:
             penalties += (cnt - quota_max) * 0.5
-            
     final_weekly_score = max(1.0, min(10.0, round(avg_score - penalties, 1)))
 else:
     final_weekly_score = 10.0
@@ -258,7 +268,7 @@ else:
 st.sidebar.metric(
     "🏆 Voto Settimana", 
     f"{final_weekly_score}/10", 
-    help="Valutato su aderenza pasti registrati e rispetto dei tetti massimi delle categorie settimanali."
+    help="Valutato su aderenza pasti registrati e rispetto dei limiti massimi delle categorie."
 )
 
 def generate_offline_suggestions(available_items: list):
@@ -313,7 +323,7 @@ def get_meal_suggestions(meal_slot: str, available_items: list):
 
 # --- Interfaccia Principale ---
 st.title("🥗 Handy Diet Tracker")
-st.caption(f"Orario rilevato: **{now.strftime('%H:%M')}** ➔ Pasto suggerito: **{current_slot}**")
+st.caption(f"Orario: **{now.strftime('%H:%M')}** ➔ Suggerimento: **{current_slot}**")
 
 tab_suggest, tab_register, tab_quotas, tab_water, tab_weight = st.tabs([
     "💡 Proposta Pasto",
@@ -350,7 +360,7 @@ with tab_suggest:
                 st.caption(f"Motivazione: {p.get('why')}")
                 st.divider()
 
-# === TAB 2: REGISTRAZIONE PASTO & CALENDARIO STORICO ===
+# === TAB 2: REGISTRAZIONE PASTO & DIARIO GIORNALIERO ===
 with tab_register:
     st.subheader("Registra pasto & scala quota")
 
@@ -396,7 +406,7 @@ with tab_register:
         manual_kcal = st.number_input(
             "Calorie stimate (automatiche dal piano)", 
             min_value=0, max_value=2500, value=auto_kcal, step=10,
-            help="Calcolate in automatico in base alla porzione Handy Diet. Puoi modificarle liberamente se hai mangiato di più o di meno."
+            help="Calcolate in automatico dalla porzione standard. Puoi modificarle liberamente."
         )
     with col_m2:
         manual_score = st.slider("Voto aderenza a questa porzione (1-10)", min_value=1, max_value=10, value=10)
@@ -429,9 +439,7 @@ with tab_register:
             manual_score,
             meal_desc,
             manual_kcal,
-            0.0,
-            0.0,
-            0.0,
+            0.0, 0.0, 0.0,
             "Registrato",
             saved_img_path
         ))
@@ -439,7 +447,7 @@ with tab_register:
         st.toast(f"Pasto registrato per il {reg_date}! Scalata 1 quota.")
         st.rerun()
 
-    # --- CALENDARIO & DIARIO GIORNALIERO INTEGRATO ---
+    # --- CALENDARIO & DIARIO GIORNALIERO ---
     st.divider()
     st.subheader("📅 Calendario & Diario Pasti")
     st.caption("Seleziona una data per vedere tutti i pasti consumati, controllare le calorie giornaliere o modificare/eliminare voci.")
@@ -447,14 +455,14 @@ with tab_register:
     view_date = st.date_input("Seleziona data da consultare:", value=date.today(), key="calendar_view_date")
     view_date_str = view_date.isoformat()
 
+    # Ricerca elastica con LIKE per recuperare sia date YYYY-MM-DD sia eventuali timestamp
     day_meals = cursor.execute("""
         SELECT id, entry_time, meal_type, category_consumed, plate_summary, score, calories, image_path 
         FROM handy_logs 
-        WHERE entry_date = ? 
+        WHERE entry_date LIKE ? 
         ORDER BY id ASC
-    """, (view_date_str,)).fetchall()
+    """, (f"{view_date_str}%",)).fetchall()
 
-    # Riassunto Giornaliero Kcal
     tot_day_kcal = sum([m[6] for m in day_meals if m[6] is not None])
     delta_kcal = tot_day_kcal - target_daily_kcal
 
@@ -475,7 +483,6 @@ with tab_register:
                 if m_img and os.path.exists(m_img):
                     st.image(m_img, caption="Foto piatto", width=250)
 
-                # Form per Modificare
                 with st.popover("✏️ Modifica questo pasto"):
                     new_summary = st.text_input("Descrizione:", value=m_sum, key=f"edit_sum_{m_id}")
                     new_kcal = st.number_input("Calorie (kcal):", value=int(m_kcal or 0), step=10, key=f"edit_kcal_{m_id}")
@@ -490,7 +497,6 @@ with tab_register:
                         st.toast("Pasto aggiornato!")
                         st.rerun()
 
-                # Tasto Elimina con ripristino quota
                 if st.button(f"🗑️ Elimina Pasto", key=f"del_{m_id}", type="secondary"):
                     cursor.execute("DELETE FROM handy_logs WHERE id = ?", (m_id,))
                     conn.commit()
@@ -521,12 +527,12 @@ with tab_quotas:
 
     st.divider()
     st.subheader("⚙️ Gestione Rapida Quote Settimanali")
-    st.caption("Vuoi togliere o aggiungere un pasto consumato senza passare dal form?")
+    st.caption("Rimuovi o aggiungi rapidamente una quota senza passare dal form:")
     
     sel_cat_manage = st.selectbox("Seleziona categoria:", list(WEEKLY_QUOTAS.keys()), key="sel_cat_manage")
     c_m1, c_m2 = st.columns(2)
     with c_m1:
-        if st.button("➖ Rimuovi ultimo pasto registrato di questa voce", use_container_width=True):
+        if st.button("➖ Rimuovi ultimo pasto di questa voce", use_container_width=True):
             last_id = cursor.execute("""
                 SELECT id FROM handy_logs 
                 WHERE week_number = ? AND category_consumed = ? 
@@ -535,10 +541,10 @@ with tab_quotas:
             if last_id:
                 cursor.execute("DELETE FROM handy_logs WHERE id = ?", (last_id[0],))
                 conn.commit()
-                st.toast(f"Rimosso un pasto da {sel_cat_manage}!")
+                st.toast(f"Rimosso pasto da {sel_cat_manage}!")
                 st.rerun()
             else:
-                st.warning("Nessun pasto trovato per questa voce nella settimana corrente.")
+                st.warning("Nessun pasto registrato per questa voce nella settimana attiva.")
     with c_m2:
         if st.button("➕ Registra rapido 1 quota (senza foto)", use_container_width=True):
             auto_k = WEEKLY_QUOTAS[sel_cat_manage]["default_kcal"]
@@ -579,7 +585,6 @@ with tab_water:
     cur_lungo = int(h_data[3] or 0) if h_data else 0
     cur_americano = int(h_data[4] or 0) if h_data else 0
 
-    # Conversione caffè in cl (1 espresso = 3 cl, 1 lungo = 6 cl, 1 americano = 15 cl)
     coffee_cl = (cur_espresso * 3.0) + (cur_lungo * 6.0) + (cur_americano * 15.0)
     total_liquids_cl = cur_water_cl + cur_tea_cl
 
