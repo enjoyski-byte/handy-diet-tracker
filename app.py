@@ -2,7 +2,7 @@ import os
 import json
 import sqlite3
 import time
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from PIL import Image
 import pandas as pd
 import streamlit as st
@@ -73,8 +73,8 @@ cursor.execute("""
     CREATE TABLE IF NOT EXISTS hydration_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         entry_date TEXT UNIQUE,
-        water_ml INTEGER DEFAULT 0,
-        coffee_count INTEGER DEFAULT 0,
+        water_cl REAL DEFAULT 0,
+        tea_cl REAL DEFAULT 0,
         coffee_espresso INTEGER DEFAULT 0,
         coffee_lungo INTEGER DEFAULT 0,
         coffee_americano INTEGER DEFAULT 0
@@ -82,6 +82,10 @@ cursor.execute("""
 """)
 
 existing_hyd_cols = [col[1] for col in cursor.execute("PRAGMA table_info(hydration_logs)").fetchall()]
+if "water_cl" not in existing_hyd_cols:
+    cursor.execute("ALTER TABLE hydration_logs ADD COLUMN water_cl REAL DEFAULT 0")
+if "tea_cl" not in existing_hyd_cols:
+    cursor.execute("ALTER TABLE hydration_logs ADD COLUMN tea_cl REAL DEFAULT 0")
 for col_name in ["coffee_espresso", "coffee_lungo", "coffee_americano"]:
     if col_name not in existing_hyd_cols:
         cursor.execute(f"ALTER TABLE hydration_logs ADD COLUMN {col_name} INTEGER DEFAULT 0")
@@ -131,72 +135,72 @@ current_week_str = now.strftime("%Y-W%W")
 today_str = date.today().isoformat()
 
 cursor.execute("""
-    INSERT OR IGNORE INTO hydration_logs (entry_date, water_ml, coffee_count, coffee_espresso, coffee_lungo, coffee_americano) 
+    INSERT OR IGNORE INTO hydration_logs (entry_date, water_cl, tea_cl, coffee_espresso, coffee_lungo, coffee_americano) 
     VALUES (?, 0, 0, 0, 0, 0)
 """, (today_str,))
 conn.commit()
 
-# --- Quote Settimanali Esatte (Handy Diet Dr. Sculati) ---
+# --- Quote Settimanali Esatte con Stima Kcal di Riferimento ---
 WEEKLY_QUOTAS = {
     # COLAZIONE (Totale: 7)
     "Colazione [5x] - Yogurt Intero + Noci (5) + Fiocchi di Avena (5 cucchiai)": {
-        "max": 5, "slot": "Colazione",
+        "max": 5, "slot": "Colazione", "default_kcal": 420,
         "desc": "Yogurt intero (250 ml) + 5 noci secche + 5 cucchiai fiocchi di avena"
     },
     "Colazione [2x] - Pane di Segale (1 mano) + Ricotta (125g) + Marmellata Light": {
-        "max": 2, "slot": "Colazione",
+        "max": 2, "slot": "Colazione", "default_kcal": 360,
         "desc": "Pane di segale (1 mano) + 1/2 vasetto ricotta (125g) + 3 cucchiaini marmellata Hero Light"
     },
 
     # PRANZO (Totale: 7)
     "Pranzo [2x] - Pasta corta al sugo leggero (1 pugno schiacciato) + Verdura cotta": {
-        "max": 2, "slot": "Pranzo",
+        "max": 2, "slot": "Pranzo", "default_kcal": 460,
         "desc": "Pasta corta con sugo leggero (1 pugno schiacciato) + verdura cotta condita (1 pugno)"
     },
     "Pranzo [2x] - Secondo di Carne (1 mano) + Verdura cotta + 2 Gallette": {
-        "max": 2, "slot": "Pranzo",
+        "max": 2, "slot": "Pranzo", "default_kcal": 430,
         "desc": "Carne semplice (1 mano) + verdura cotta (1 pugno) + 2 gallette norvegesi"
     },
     "Pranzo [2x] - Insalatone con 2 Uova sode + Ortaggi misti + 2 Gallette": {
-        "max": 2, "slot": "Pranzo",
+        "max": 2, "slot": "Pranzo", "default_kcal": 390,
         "desc": "Insalatone (1.5 pugni cruda + 1 pugno ortaggi) + 2 uova sode + 2 gallette norvegesi"
     },
     "Pranzo [1x] - Zuppa di legumi (1 fondina 250ml) + 2 Gallette": {
-        "max": 1, "slot": "Pranzo",
+        "max": 1, "slot": "Pranzo", "default_kcal": 380,
         "desc": "Zuppa di legumi (250 ml) + 2 gallette norvegesi"
     },
 
     # SPUNTINO POMERIDIANO (Totale: 7)
     "Spuntino [7x] - Frutta fresca di stagione (1 pugno)": {
-        "max": 7, "slot": "Spuntino",
+        "max": 7, "slot": "Spuntino", "default_kcal": 90,
         "desc": "1 pugno di frutta fresca di stagione"
     },
 
     # CENA (Totale: 7)
     "Cena [2x] - Pesce semplice (1 mano) + Verdura cruda + 6 cucchiai Piselli": {
-        "max": 2, "slot": "Cena",
+        "max": 2, "slot": "Cena", "default_kcal": 420,
         "desc": "Pesce semplice ai ferri/vapore (1 mano) + verdura cruda (1.5 pugni) + 6 cucchiai piselli in padella"
     },
     "Cena [2x] - Minestrone (500ml) + Formaggio stagionato (2 dita)": {
-        "max": 2, "slot": "Cena",
+        "max": 2, "slot": "Cena", "default_kcal": 440,
         "desc": "Minestrone con legumi e patate (500 ml) + formaggio stagionato con crosta (2 dita)"
     },
     "Cena [1x] - Uova (2 unità tegamino/frittata) + Verdura cruda + 2 Gallette": {
-        "max": 1, "slot": "Cena",
+        "max": 1, "slot": "Cena", "default_kcal": 380,
         "desc": "2 uova al tegamino/strapazzate/frittata + verdura cruda (1.5 pugni) + 2 gallette norvegesi"
     },
     "Cena [1x] - Petto di Pollo/Tacchino ai ferri (1 mano) + Verdura cruda + 2 Gallette": {
-        "max": 1, "slot": "Cena",
+        "max": 1, "slot": "Cena", "default_kcal": 390,
         "desc": "Petto di pollo o tacchino ai ferri (1 mano) + verdura cruda (1.5 pugni) + 2 gallette norvegesi"
     },
     "Cena [1x] - Pasto Libero con moderazione (senza pizza)": {
-        "max": 1, "slot": "Cena",
+        "max": 1, "slot": "Cena", "default_kcal": 750,
         "desc": "1 pasto libero settimanale con moderazione (evitare la pizza)"
     },
 
     # SPUNTINO SERALE (Totale: 4)
     "Spuntino Serale [4x] - Cioccolato Fondente 85% Perugina Nero (2 quadretti)": {
-        "max": 4, "slot": "Spuntino Serale",
+        "max": 4, "slot": "Spuntino Serale", "default_kcal": 110,
         "desc": "2 quadretti di cioccolato fondente 85% Perugina Nero"
     }
 }
@@ -217,17 +221,45 @@ for cat, meta in WEEKLY_QUOTAS.items():
         "used": consumed_counts.get(cat, 0),
         "remaining": max(0, rem),
         "slot": meta["slot"],
-        "desc": meta["desc"]
+        "desc": meta["desc"],
+        "default_kcal": meta["default_kcal"]
     }
 
 # --- Sidebar ---
 st.sidebar.header("🎯 Impostazioni")
 target_weight = st.sidebar.number_input("Target Peso Corporeo (kg)", min_value=50.0, max_value=100.0, value=66.5, step=0.1)
-target_water_l = st.sidebar.number_input("Target Acqua/Tisane (Litri)", min_value=1.5, max_value=5.0, value=2.5, step=0.1)
+target_daily_kcal = st.sidebar.number_input("Target Calorie Giornaliere (kcal)", min_value=1200, max_value=3500, value=1750, step=50)
+target_water_cl = st.sidebar.number_input("Target Acqua / Tisane (cl)", min_value=100.0, max_value=500.0, value=250.0, step=10.0)
 
 st.sidebar.divider()
 st.sidebar.markdown(f"**Settimana attiva:** `{current_week_str}`")
-st.sidebar.caption("I dati storici restano memorizzati per sempre. La nuova settimana riparte con il conteggio a 0 per le quote.")
+
+# Calcolo Voto Settimanale Automatico
+week_meals = cursor.execute(
+    "SELECT score, calories, category_consumed FROM handy_logs WHERE week_number = ?", 
+    (current_week_str,)
+).fetchall()
+
+if week_meals:
+    scores = [m[0] for m in week_meals if m[0] is not None]
+    avg_score = sum(scores) / len(scores) if scores else 8.0
+    
+    # Penalità se si superano le quote massime prescritte
+    penalties = 0
+    for cat_name, cnt in consumed_counts.items():
+        quota_max = WEEKLY_QUOTAS[cat_name]["max"]
+        if cnt > quota_max:
+            penalties += (cnt - quota_max) * 0.5
+            
+    final_weekly_score = max(1.0, min(10.0, round(avg_score - penalties, 1)))
+else:
+    final_weekly_score = 10.0
+
+st.sidebar.metric(
+    "🏆 Voto Settimana", 
+    f"{final_weekly_score}/10", 
+    help="Valutato su aderenza pasti registrati e rispetto dei tetti massimi delle categorie settimanali."
+)
 
 def generate_offline_suggestions(available_items: list):
     proposals = []
@@ -279,15 +311,15 @@ def get_meal_suggestions(meal_slot: str, available_items: list):
     except Exception:
         return generate_offline_suggestions(available_items)
 
-# --- Interfaccia ---
+# --- Interfaccia Principale ---
 st.title("🥗 Handy Diet Tracker")
 st.caption(f"Orario rilevato: **{now.strftime('%H:%M')}** ➔ Pasto suggerito: **{current_slot}**")
 
 tab_suggest, tab_register, tab_quotas, tab_water, tab_weight = st.tabs([
     "💡 Proposta Pasto",
-    "📝 Registra Pasto",
+    "📝 Registra Pasto & Diario",
     "📊 Monte Settimanale",
-    "💧 Acqua & Caffè",
+    "💧 Acqua, Tisane & Caffè",
     "⚖️ Controllo Peso"
 ])
 
@@ -318,25 +350,35 @@ with tab_suggest:
                 st.caption(f"Motivazione: {p.get('why')}")
                 st.divider()
 
-# === TAB 2: REGISTRAZIONE PASTO ===
+# === TAB 2: REGISTRAZIONE PASTO & CALENDARIO STORICO ===
 with tab_register:
     st.subheader("Registra pasto & scala quota")
 
     col_s1, col_s2 = st.columns(2)
     with col_s1:
-        sel_slot = st.selectbox("Pasto:", ["Colazione", "Pranzo", "Spuntino", "Cena", "Spuntino Serale"], index=["Colazione", "Pranzo", "Spuntino", "Cena", "Spuntino Serale"].index(current_slot))
+        sel_slot = st.selectbox(
+            "Pasto:", 
+            ["Colazione", "Pranzo", "Spuntino", "Cena", "Spuntino Serale"], 
+            index=["Colazione", "Pranzo", "Spuntino", "Cena", "Spuntino Serale"].index(current_slot)
+        )
     with col_s2:
         cat_choices = [k for k, v in remaining_options.items() if v["slot"] == sel_slot]
         if not cat_choices:
-            cat_choices = list(WEEKLY_QUOTAS.keys())
+            cat_choices = [k for k in WEEKLY_QUOTAS.keys() if WEEKLY_QUOTAS[k]["slot"] == sel_slot]
         sel_category = st.selectbox(
             "Voce della dieta da scalare:",
             cat_choices,
             format_func=lambda x: f"{x} (Rimaste: {remaining_options.get(x, {}).get('remaining', 0)}/{remaining_options.get(x, {}).get('max', 0)})"
         )
 
+    auto_kcal = WEEKLY_QUOTAS.get(sel_category, {}).get("default_kcal", 350)
+
     st.markdown("---")
-    meal_desc = st.text_input("Descrivi cosa hai mangiato:", placeholder="Es. Yogurt intero con 5 noci e 5 cucchiai avena")
+    meal_desc = st.text_input(
+        "Descrivi cosa hai mangiato:", 
+        value=WEEKLY_QUOTAS.get(sel_category, {}).get("desc", ""),
+        placeholder="Es. Yogurt intero con 5 noci e 5 cucchiai avena"
+    )
 
     st.caption("📷 Vuoi allegare una foto per verifica e ricordo? (Opzionale)")
     photo_sub = st.radio("Sorgente foto:", ["Nessuna foto", "Scatta foto", "Carica da galleria"], horizontal=True)
@@ -351,9 +393,15 @@ with tab_register:
 
     col_m1, col_m2 = st.columns(2)
     with col_m1:
-        manual_kcal = st.number_input("Calorie stimate (kcal)", min_value=0, max_value=2500, value=250, step=10)
+        manual_kcal = st.number_input(
+            "Calorie stimate (automatiche dal piano)", 
+            min_value=0, max_value=2500, value=auto_kcal, step=10,
+            help="Calcolate in automatico in base alla porzione Handy Diet. Puoi modificarle liberamente se hai mangiato di più o di meno."
+        )
     with col_m2:
-        manual_score = st.slider("Voto aderenza alla dieta (1-10)", min_value=1, max_value=10, value=9)
+        manual_score = st.slider("Voto aderenza a questa porzione (1-10)", min_value=1, max_value=10, value=10)
+
+    reg_date = st.date_input("Data del pasto da registrare:", value=date.today(), key="reg_meal_date")
 
     if st.button("💾 Salva e Scala Subito", type="primary"):
         if not meal_desc.strip():
@@ -365,33 +413,95 @@ with tab_register:
             saved_img_path = f"meal_images/{timestamp_str}.jpg"
             Image.open(img_file).save(saved_img_path)
 
+        reg_week_str = reg_date.strftime("%Y-W%W")
+
         cursor.execute("""
             INSERT INTO handy_logs (
                 entry_date, entry_time, week_number, meal_type, category_consumed,
                 score, plate_summary, calories, carbs_g, protein_g, fat_g, verdict, image_path
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            date.today().isoformat(),
+            reg_date.isoformat(),
             datetime.now().strftime("%H:%M"),
-            current_week_str,
+            reg_week_str,
             sel_slot,
             sel_category,
             manual_score,
             meal_desc,
             manual_kcal,
-            10.0,
-            15.0,
-            10.0,
+            0.0,
+            0.0,
+            0.0,
             "Registrato",
             saved_img_path
         ))
         conn.commit()
-        st.toast(f"Pasto registrato! Scalata 1 quota da: {sel_category}")
+        st.toast(f"Pasto registrato per il {reg_date}! Scalata 1 quota.")
         st.rerun()
 
-# === TAB 3: MONTE SETTIMANALE & ARCHIVIO PERMANENTE ===
+    # --- CALENDARIO & DIARIO GIORNALIERO INTEGRATO ---
+    st.divider()
+    st.subheader("📅 Calendario & Diario Pasti")
+    st.caption("Seleziona una data per vedere tutti i pasti consumati, controllare le calorie giornaliere o modificare/eliminare voci.")
+
+    view_date = st.date_input("Seleziona data da consultare:", value=date.today(), key="calendar_view_date")
+    view_date_str = view_date.isoformat()
+
+    day_meals = cursor.execute("""
+        SELECT id, entry_time, meal_type, category_consumed, plate_summary, score, calories, image_path 
+        FROM handy_logs 
+        WHERE entry_date = ? 
+        ORDER BY id ASC
+    """, (view_date_str,)).fetchall()
+
+    # Riassunto Giornaliero Kcal
+    tot_day_kcal = sum([m[6] for m in day_meals if m[6] is not None])
+    delta_kcal = tot_day_kcal - target_daily_kcal
+
+    col_k1, col_k2, col_k3 = st.columns(3)
+    col_k1.metric("Kcal Consumate", f"{tot_day_kcal} kcal")
+    col_k2.metric("Target Giornaliero", f"{target_daily_kcal} kcal")
+    col_k3.metric("Scostamento Target", f"{delta_kcal:+d} kcal", delta_color="inverse" if delta_kcal > 0 else "normal")
+
+    if not day_meals:
+        st.info(f"Nessun pasto registrato per il giorno **{view_date.strftime('%d/%m/%Y')}**.")
+    else:
+        st.markdown(f"#### Pasti registrati il {view_date.strftime('%d/%m/%Y')} ({len(day_meals)} pasti):")
+        for m in day_meals:
+            m_id, m_time, m_slot, m_cat, m_sum, m_score, m_kcal, m_img = m
+            
+            with st.expander(f"🕒 {m_time} | **{m_slot}**: {m_sum} ({m_kcal} kcal - Voto: {m_score}/10)"):
+                st.markdown(f"**Categoria associata:** `{m_cat}`")
+                if m_img and os.path.exists(m_img):
+                    st.image(m_img, caption="Foto piatto", width=250)
+
+                # Form per Modificare
+                with st.popover("✏️ Modifica questo pasto"):
+                    new_summary = st.text_input("Descrizione:", value=m_sum, key=f"edit_sum_{m_id}")
+                    new_kcal = st.number_input("Calorie (kcal):", value=int(m_kcal or 0), step=10, key=f"edit_kcal_{m_id}")
+                    new_score = st.slider("Voto (1-10):", min_value=1, max_value=10, value=int(m_score or 10), key=f"edit_sc_{m_id}")
+                    if st.button("Salva modifiche", key=f"btn_save_{m_id}"):
+                        cursor.execute("""
+                            UPDATE handy_logs 
+                            SET plate_summary = ?, calories = ?, score = ? 
+                            WHERE id = ?
+                        """, (new_summary, new_kcal, new_score, m_id))
+                        conn.commit()
+                        st.toast("Pasto aggiornato!")
+                        st.rerun()
+
+                # Tasto Elimina con ripristino quota
+                if st.button(f"🗑️ Elimina Pasto", key=f"del_{m_id}", type="secondary"):
+                    cursor.execute("DELETE FROM handy_logs WHERE id = ?", (m_id,))
+                    conn.commit()
+                    st.toast("Pasto eliminato e quota ripristinata!")
+                    st.rerun()
+
+# === TAB 3: MONTE SETTIMANALE ===
 with tab_quotas:
-    st.subheader(f"Stato Settimana Attuale ({current_week_str})")
+    st.subheader(f"Monte Settimanale Quote ({current_week_str})")
+    st.caption("Controlla le porzioni consumate e quelle rimaste. Puoi annullare o scalare manualmente una porzione con un click.")
+    
     table_data = []
     for cat, val in remaining_options.items():
         table_data.append({
@@ -402,141 +512,175 @@ with tab_quotas:
             "Rimanenti": val["remaining"]
         })
     df_quotas = pd.DataFrame(table_data)
+    
     for s_name in ["Colazione", "Pranzo", "Spuntino", "Cena", "Spuntino Serale"]:
         sub = df_quotas[df_quotas["Pasto"] == s_name]
         if not sub.empty:
             st.markdown(f"#### 🍽️ {s_name}")
-            st.dataframe(sub[["Opzione Prescritta", "Fatti", "Previsti", "Rimanenti"]], hide_index=True)
+            st.dataframe(sub[["Opzione Prescritta", "Fatti", "Previsti", "Rimanenti"]], hide_index=True, use_container_width=True)
 
     st.divider()
-    st.subheader("Archivio Storico Pasti (Non si azzera)")
-    past_meals = cursor.execute(
-        "SELECT entry_date, entry_time, week_number, meal_type, category_consumed, plate_summary, score, calories, image_path FROM handy_logs ORDER BY id DESC"
-    ).fetchall()
+    st.subheader("⚙️ Gestione Rapida Quote Settimanali")
+    st.caption("Vuoi togliere o aggiungere un pasto consumato senza passare dal form?")
+    
+    sel_cat_manage = st.selectbox("Seleziona categoria:", list(WEEKLY_QUOTAS.keys()), key="sel_cat_manage")
+    c_m1, c_m2 = st.columns(2)
+    with c_m1:
+        if st.button("➖ Rimuovi ultimo pasto registrato di questa voce", use_container_width=True):
+            last_id = cursor.execute("""
+                SELECT id FROM handy_logs 
+                WHERE week_number = ? AND category_consumed = ? 
+                ORDER BY id DESC LIMIT 1
+            """, (current_week_str, sel_cat_manage)).fetchone()
+            if last_id:
+                cursor.execute("DELETE FROM handy_logs WHERE id = ?", (last_id[0],))
+                conn.commit()
+                st.toast(f"Rimosso un pasto da {sel_cat_manage}!")
+                st.rerun()
+            else:
+                st.warning("Nessun pasto trovato per questa voce nella settimana corrente.")
+    with c_m2:
+        if st.button("➕ Registra rapido 1 quota (senza foto)", use_container_width=True):
+            auto_k = WEEKLY_QUOTAS[sel_cat_manage]["default_kcal"]
+            cursor.execute("""
+                INSERT INTO handy_logs (
+                    entry_date, entry_time, week_number, meal_type, category_consumed,
+                    score, plate_summary, calories, carbs_g, protein_g, fat_g, verdict, image_path
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                today_str,
+                datetime.now().strftime("%H:%M"),
+                current_week_str,
+                WEEKLY_QUOTAS[sel_cat_manage]["slot"],
+                sel_cat_manage,
+                10,
+                WEEKLY_QUOTAS[sel_cat_manage]["desc"],
+                auto_k,
+                0.0, 0.0, 0.0,
+                "Registrato rapido",
+                None
+            ))
+            conn.commit()
+            st.toast(f"Aggiunta 1 quota a {sel_cat_manage}!")
+            st.rerun()
 
-    if not past_meals:
-        st.write("Nessun pasto registrato finora.")
-    else:
-        for row in past_meals:
-            p_date, p_time, p_week, p_slot, p_cat, p_summary, p_score, p_kcal, p_img = row
-            with st.expander(f"🕒 {p_date} {p_time} ({p_week}) - {p_slot}: {p_summary} (Voto: {p_score}/10 | {p_kcal} kcal)"):
-                st.write(f"**Categoria associata:** `{p_cat}`")
-                if p_img and os.path.exists(p_img):
-                    st.image(p_img, caption="Foto registrata", width=300)
-
-# === TAB 4: IDRATAZIONE ===
+# === TAB 4: ACQUA, TISANE & CAFFÈ (IN CL) ===
 with tab_water:
-    st.subheader("💧 Monitor Idratazione & Caffè di Oggi")
+    st.subheader("💧 Monitor Liquidi di Oggi (in cl)")
     
     h_data = cursor.execute("""
-        SELECT water_ml, coffee_count, coffee_espresso, coffee_lungo, coffee_americano 
+        SELECT water_cl, tea_cl, coffee_espresso, coffee_lungo, coffee_americano 
         FROM hydration_logs WHERE entry_date = ?
     """, (today_str,)).fetchone()
 
-    current_water_ml = h_data[0] if h_data else 0
-    current_coffee = h_data[1] if h_data else 0
-    current_espresso = h_data[2] if (h_data and len(h_data) > 2 and h_data[2] is not None) else 0
-    current_lungo = h_data[3] if (h_data and len(h_data) > 3 and h_data[3] is not None) else 0
-    current_americano = h_data[4] if (h_data and len(h_data) > 4 and h_data[4] is not None) else 0
+    cur_water_cl = float(h_data[0] or 0) if h_data else 0.0
+    cur_tea_cl = float(h_data[1] or 0) if h_data else 0.0
+    cur_espresso = int(h_data[2] or 0) if h_data else 0
+    cur_lungo = int(h_data[3] or 0) if h_data else 0
+    cur_americano = int(h_data[4] or 0) if h_data else 0
 
-    current_water_l = current_water_ml / 1000.0
-    remaining_water_l = max(0.0, target_water_l - current_water_l)
-    progress_water = min(1.0, current_water_l / target_water_l)
+    # Conversione caffè in cl (1 espresso = 3 cl, 1 lungo = 6 cl, 1 americano = 15 cl)
+    coffee_cl = (cur_espresso * 3.0) + (cur_lungo * 6.0) + (cur_americano * 15.0)
+    total_liquids_cl = cur_water_cl + cur_tea_cl
 
-    c_w1, c_w2, c_w3 = st.columns(3)
-    c_w1.metric("Acqua / Tisane", f"{current_water_l:.2f} L", delta=f"{current_water_ml} ml")
-    c_w2.metric("Mancanti al Target", f"{remaining_water_l:.2f} L", delta=f"Target: {target_water_l:.1f} L")
-    c_w3.metric("Totale Caffè", f"{current_coffee} ☕")
+    remaining_cl = max(0.0, target_water_cl - total_liquids_cl)
+    progress_val = min(1.0, total_liquids_cl / target_water_cl) if target_water_cl > 0 else 1.0
 
-    st.progress(progress_water)
-    if current_water_l >= target_water_l:
-        st.success(f"🎉 **Target raggiunto!** Hai superato i {target_water_l} litri.")
-    else:
-        st.info(f"💡 Mancano circa **{int(remaining_water_l * 1000 / 250)} bicchieri** da 250 ml.")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Acqua", f"{cur_water_cl:.0f} cl")
+    c2.metric("Tisane", f"{cur_tea_cl:.0f} cl")
+    c3.metric("Caffè (totale cl)", f"{coffee_cl:.0f} cl", delta=f"{cur_espresso + cur_lungo + cur_americano} tazzine")
+    c4.metric("Mancanti al Target", f"{remaining_cl:.0f} cl", delta=f"Target: {target_water_cl:.0f} cl")
 
-    st.markdown("#### Aggiungi Liquidi")
-    btn_col1, btn_col2, btn_col3 = st.columns(3)
-    with btn_col1:
-        if st.button("🥛 +1 Bicchiere (250 ml)", use_container_width=True):
-            cursor.execute("UPDATE hydration_logs SET water_ml = water_ml + 250 WHERE entry_date = ?", (today_str,))
+    st.progress(progress_val)
+    if total_liquids_cl >= target_water_cl:
+        st.success(f"🎉 **Target raggiunto!** Hai assunto {total_liquids_cl:.0f} cl tra acqua e tisane.")
+
+    st.divider()
+    st.markdown("#### 🥛 Registra Acqua (in cl)")
+    w_b1, w_b2, w_b3, w_b4 = st.columns(4)
+    with w_b1:
+        if st.button("+25 cl (Bicchiere)", use_container_width=True):
+            cursor.execute("UPDATE hydration_logs SET water_cl = water_cl + 25 WHERE entry_date = ?", (today_str,))
             conn.commit()
             st.rerun()
-    with btn_col2:
-        if st.button("🫖 +1 Tisana (250 ml)", use_container_width=True):
-            cursor.execute("UPDATE hydration_logs SET water_ml = water_ml + 250 WHERE entry_date = ?", (today_str,))
+    with w_b2:
+        if st.button("+50 cl (Borraccia)", use_container_width=True):
+            cursor.execute("UPDATE hydration_logs SET water_cl = water_cl + 50 WHERE entry_date = ?", (today_str,))
             conn.commit()
             st.rerun()
-    with btn_col3:
-        if st.button("🧴 +1 Borraccia (500 ml)", use_container_width=True):
-            cursor.execute("UPDATE hydration_logs SET water_ml = water_ml + 500 WHERE entry_date = ?", (today_str,))
+    with w_b3:
+        if st.button("+100 cl (1 Litro)", use_container_width=True):
+            cursor.execute("UPDATE hydration_logs SET water_cl = water_cl + 100 WHERE entry_date = ?", (today_str,))
             conn.commit()
             st.rerun()
+    with w_b4:
+        if cur_water_cl >= 25:
+            if st.button("-25 cl (Correggi)", use_container_width=True):
+                cursor.execute("UPDATE hydration_logs SET water_cl = max(0, water_cl - 25) WHERE entry_date = ?", (today_str,))
+                conn.commit()
+                st.rerun()
 
-    st.markdown("---")
-    st.markdown("#### Registro Tipologia Caffè")
+    st.markdown("#### 🫖 Registra Tisane (in cl)")
+    t_b1, t_b2, t_b3 = st.columns(3)
+    with t_b1:
+        if st.button("+25 cl (Tazza tisana)", use_container_width=True):
+            cursor.execute("UPDATE hydration_logs SET tea_cl = tea_cl + 25 WHERE entry_date = ?", (today_str,))
+            conn.commit()
+            st.rerun()
+    with t_b2:
+        if st.button("+50 cl (Teiera)", use_container_width=True):
+            cursor.execute("UPDATE hydration_logs SET tea_cl = tea_cl + 50 WHERE entry_date = ?", (today_str,))
+            conn.commit()
+            st.rerun()
+    with t_b3:
+        if cur_tea_cl >= 25:
+            if st.button("-25 cl Tisana", use_container_width=True):
+                cursor.execute("UPDATE hydration_logs SET tea_cl = max(0, tea_cl - 25) WHERE entry_date = ?", (today_str,))
+                conn.commit()
+                st.rerun()
+
+    st.divider()
+    st.markdown("#### ☕ Registro Caffè")
 
     k_col1, k_col2, k_col3 = st.columns(3)
     with k_col1:
-        st.metric("Espresso", f"{current_espresso}")
+        st.metric("Espresso (3 cl)", f"{cur_espresso}")
         if st.button("☕ +1 Espresso", use_container_width=True, type="primary"):
-            cursor.execute("""
-                UPDATE hydration_logs 
-                SET coffee_espresso = coffee_espresso + 1, coffee_count = coffee_count + 1 
-                WHERE entry_date = ?
-            """, (today_str,))
+            cursor.execute("UPDATE hydration_logs SET coffee_espresso = coffee_espresso + 1 WHERE entry_date = ?", (today_str,))
             conn.commit()
             st.rerun()
-        if current_espresso > 0:
+        if cur_espresso > 0:
             if st.button("↩️ -1 Espresso", use_container_width=True):
-                cursor.execute("""
-                    UPDATE hydration_logs 
-                    SET coffee_espresso = max(0, coffee_espresso - 1), coffee_count = max(0, coffee_count - 1) 
-                    WHERE entry_date = ?
-                """, (today_str,))
+                cursor.execute("UPDATE hydration_logs SET coffee_espresso = max(0, coffee_espresso - 1) WHERE entry_date = ?", (today_str,))
                 conn.commit()
                 st.rerun()
 
     with k_col2:
-        st.metric("Lungo", f"{current_lungo}")
+        st.metric("Lungo (6 cl)", f"{cur_lungo}")
         if st.button("☕ +1 Lungo", use_container_width=True, type="primary"):
-            cursor.execute("""
-                UPDATE hydration_logs 
-                SET coffee_lungo = coffee_lungo + 1, coffee_count = coffee_count + 1 
-                WHERE entry_date = ?
-            """, (today_str,))
+            cursor.execute("UPDATE hydration_logs SET coffee_lungo = coffee_lungo + 1 WHERE entry_date = ?", (today_str,))
             conn.commit()
             st.rerun()
-        if current_lungo > 0:
+        if cur_lungo > 0:
             if st.button("↩️ -1 Lungo", use_container_width=True):
-                cursor.execute("""
-                    UPDATE hydration_logs 
-                    SET coffee_lungo = max(0, coffee_lungo - 1), coffee_count = max(0, coffee_count - 1) 
-                    WHERE entry_date = ?
-                """, (today_str,))
+                cursor.execute("UPDATE hydration_logs SET coffee_lungo = max(0, coffee_lungo - 1) WHERE entry_date = ?", (today_str,))
                 conn.commit()
                 st.rerun()
 
     with k_col3:
-        st.metric("Americano", f"{current_americano}")
+        st.metric("Americano (15 cl)", f"{cur_americano}")
         if st.button("☕ +1 Americano", use_container_width=True, type="primary"):
-            cursor.execute("""
-                UPDATE hydration_logs 
-                SET coffee_americano = coffee_americano + 1, coffee_count = coffee_count + 1, water_ml = water_ml + 150 
-                WHERE entry_date = ?
-            """, (today_str,))
+            cursor.execute("UPDATE hydration_logs SET coffee_americano = coffee_americano + 1 WHERE entry_date = ?", (today_str,))
             conn.commit()
             st.rerun()
-        if current_americano > 0:
+        if cur_americano > 0:
             if st.button("↩️ -1 Americano", use_container_width=True):
-                cursor.execute("""
-                    UPDATE hydration_logs 
-                    SET coffee_americano = max(0, coffee_americano - 1), coffee_count = max(0, coffee_count - 1), water_ml = max(0, water_ml - 150) 
-                    WHERE entry_date = ?
-                """, (today_str,))
+                cursor.execute("UPDATE hydration_logs SET coffee_americano = max(0, coffee_americano - 1) WHERE entry_date = ?", (today_str,))
                 conn.commit()
                 st.rerun()
 
-# === TAB 5: CONTROLLO PESO CON TUTTO LO STORICO ===
+# === TAB 5: CONTROLLO PESO ===
 with tab_weight:
     st.subheader("⚖️ Diario Peso Corporeo & Andamento Storico")
     
@@ -565,7 +709,6 @@ with tab_weight:
         min_historical = df_w["weight_kg"].min()
         latest_date_str = df_w.iloc[-1]["entry_date"].strftime("%d/%m/%Y")
         
-        # Ultima variazione
         if len(df_w) > 1:
             prev_w = df_w.iloc[-2]["weight_kg"]
             d_last = latest_w - prev_w
@@ -579,9 +722,9 @@ with tab_weight:
         k3.metric("Mancanti al Target", f"{latest_w - target_weight:+.2f} kg", delta=f"Target: {target_weight:.1f} kg")
 
         if latest_w > 70.0:
-            st.warning(f"⚠️ **Attenzione al trend:** Il peso si trova a {latest_w:.2f} kg rispetto al minimo estivo di {min_historical:.2f} kg (+{latest_w - min_historical:.2f} kg). Seguire scrupolosamente le quote della Handy Diet riporterà il trend verso il target sostenibile di -2 kg al mese.")
+            st.warning(f"⚠️ **Attenzione al trend:** Il peso si trova a {latest_w:.2f} kg rispetto al minimo estivo di {min_historical:.2f} kg (+{latest_w - min_historical:.2f} kg). Seguire scrupolosamente le quote della Handy Diet riporterà il trend verso il target sostenibile.")
 
-        st.markdown("#### Grafico dell'Andamento del Peso (Giugno - Oggi)")
+        st.markdown("#### Grafico dell'Andamento del Peso")
         chart_df = df_w.set_index("entry_date")[["weight_kg"]]
         chart_df["Target"] = target_weight
         st.line_chart(chart_df)
