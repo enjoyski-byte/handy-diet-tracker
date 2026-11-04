@@ -173,7 +173,7 @@ if not api_key:
     st.stop()
 
 client = genai.Client(api_key=api_key)
-ACTIVE_MODEL = "gemini-2.5-flash"
+ACTIVE_MODEL = "gemini-1.5-flash"
 
 # --- Orario e Pasto Attuale ---
 now = datetime.now()
@@ -288,36 +288,38 @@ tot_today_kcal = sum([m[0] for m in today_meals_db if m[0] is not None])
 # --- FUNZIONE GEMINI CALCOLO CALORIE DA TESTO ---
 def stima_calorie_con_gemini(descrizione_pasto: str):
     prompt = f"""
-    Sei un nutrizionista esperto. L'utente ha consumato il seguente pasto:
-    "{descrizione_pasto}"
-
-    Analizza accuratamente ogni ingrediente e porzione dichiarata.
-    Calcola:
-    1. Calorie totali (kcal) stimate
+    Sei un nutrizionista esperto. L'utente ha consumato: "{descrizione_pasto}".
+    Analizza gli alimenti e calcola:
+    1. Calorie stimate (kcal totali)
     2. Carboidrati (g)
     3. Proteine (g)
     4. Grassi (g)
-    5. Breve spiegazione del calcolo (max 1 riga)
+    5. Breve breakdown degli ingredienti (es. "Mela 150g ~75 kcal")
 
-    Rispondi solo ed esclusivamente in formato JSON:
+    Rispondi solo ed esclusivamente in formato JSON valido:
     {{
-      "calories": 450,
-      "carbs_g": 55.0,
-      "protein_g": 30.0,
-      "fat_g": 12.0,
-      "breakdown": "Riso 90g (~315 kcal) + olio 5g (~45 kcal) + pollo 100g (~110 kcal)"
+      "calories": 75,
+      "carbs_g": 19.0,
+      "protein_g": 0.5,
+      "fat_g": 0.3,
+      "breakdown": "Mela 150g (~75 kcal)"
     }}
     """
     try:
         resp = client.models.generate_content(
             model=ACTIVE_MODEL,
             contents=prompt,
-            config={"response_mime_type": "application/json"}
+            config={
+                "response_mime_type": "application/json"
+            }
         )
-        return json.loads(resp.text)
+        # Pulisce eventuale markdown residuo
+        cleaned_text = resp.text.strip().replace("```json", "").replace("```", "")
+        return json.loads(cleaned_text)
     except Exception as e:
+        st.error(f"Dettaglio errore Gemini: {e}")
         return None
-
+Salva su GitHub: appena Streamlit si riavvia, riprova a cliccare ✨ Stima Calorie con Gemini. Se c'è ancora un problema di chiave, ti mostrerà il messaggio preciso invece di andare in blocco generico.
 # --- HEADER STATO MOBILE (ISPIRATO AL DESIGN) ---
 st.markdown(f"""
 <div class="metric-card-green">
