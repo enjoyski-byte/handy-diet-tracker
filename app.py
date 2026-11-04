@@ -15,7 +15,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# --- CSS MOBILE-FIRST ISPIRATO AL DESIGN ALLEGATO ---
+# --- CSS MOBILE-FIRST ISPIRATO AL DESIGN ---
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
@@ -24,7 +24,6 @@ st.markdown("""
         font-family: 'Plus Jakarta Sans', -apple-system, sans-serif;
     }
     
-    /* Contenitore principale compatto per mobile */
     .block-container {
         padding-top: 1.2rem !important;
         padding-bottom: 5rem !important;
@@ -34,7 +33,6 @@ st.markdown("""
         margin: 0 auto !important;
     }
 
-    /* Card moderna verde / bianca */
     .metric-card-green {
         background: linear-gradient(135deg, #dcfce7 0%, #bbf7d0 100%);
         border-radius: 24px;
@@ -53,7 +51,6 @@ st.markdown("""
         margin-bottom: 12px;
     }
     
-    /* Pulsanti touch-friendly */
     .stButton>button {
         border-radius: 16px !important;
         min-height: 48px !important;
@@ -66,12 +63,10 @@ st.markdown("""
         transform: scale(0.98) !important;
     }
     
-    /* Input arrotondati */
     input, select, textarea {
         border-radius: 14px !important;
     }
     
-    /* Badge pasto */
     .meal-pill {
         display: inline-block;
         padding: 4px 10px;
@@ -122,7 +117,6 @@ cursor.execute("""
     )
 """)
 
-# Storico pesate
 historical_weights = [
     ("2026-06-12", 66.05), ("2026-06-22", 66.55), ("2026-07-09", 67.80),
     ("2026-07-13", 67.10), ("2026-07-16", 67.90), ("2026-07-22", 67.15),
@@ -169,7 +163,7 @@ if not api_key:
     api_key = st.sidebar.text_input("Gemini API Key", type="password")
 
 if not api_key:
-    st.info("👉 Inserisci la tua API Key di Gemini nella barra laterale per attivare il calcolo calorie e i consigli.")
+    st.info("👉 Inserisci la tua API Key di Gemini nella barra laterale o nei Secrets.")
     st.stop()
 
 client = genai.Client(api_key=api_key)
@@ -199,7 +193,7 @@ cursor.execute("""
 """, (today_str,))
 conn.commit()
 
-# --- Quote Settimanali Esatte ---
+# --- Quote Settimanali ---
 WEEKLY_QUOTAS = {
     "Colazione [5x] - Yogurt Intero + Noci (5) + Fiocchi di Avena (5 cucchiai)": {
         "max": 5, "slot": "Colazione", "default_kcal": 420,
@@ -255,7 +249,6 @@ WEEKLY_QUOTAS = {
     }
 }
 
-# Conteggio quote settimana corrente
 consumed_counts = {k: 0 for k in WEEKLY_QUOTAS.keys()}
 rows = cursor.execute("SELECT category_consumed FROM handy_logs WHERE week_number = ?", (current_week_str,)).fetchall()
 for r in rows:
@@ -281,46 +274,45 @@ target_weight = st.sidebar.number_input("Target Peso (kg)", min_value=50.0, max_
 target_daily_kcal = st.sidebar.number_input("Target Calorie (kcal)", min_value=1200, max_value=3500, value=1750, step=50)
 target_water_cl = st.sidebar.number_input("Target Liquidi (cl)", min_value=100.0, max_value=500.0, value=250.0, step=10.0)
 
-# Calcolo calorie di oggi
 today_meals_db = cursor.execute("SELECT calories FROM handy_logs WHERE entry_date LIKE ?", (f"{today_str}%",)).fetchall()
 tot_today_kcal = sum([m[0] for m in today_meals_db if m[0] is not None])
 
-# --- FUNZIONE GEMINI CALCOLO CALORIE DA TESTO ---
+# --- FUNZIONE GEMINI CALCOLO CALORIE ---
 def stima_calorie_con_gemini(descrizione_pasto: str):
     prompt = f"""
-    Sei un nutrizionista esperto. L'utente ha consumato: "{descrizione_pasto}".
-    Analizza gli alimenti e calcola:
-    1. Calorie stimate (kcal totali)
+    Sei un nutrizionista esperto. L'utente ha consumato il seguente pasto:
+    "{descrizione_pasto}"
+
+    Analizza accuratamente ogni ingrediente e porzione dichiarata.
+    Calcola:
+    1. Calorie totali (kcal) stimate
     2. Carboidrati (g)
     3. Proteine (g)
     4. Grassi (g)
-    5. Breve breakdown degli ingredienti (es. "Mela 150g ~75 kcal")
+    5. Breve spiegazione del calcolo (max 1 riga)
 
-    Rispondi solo ed esclusivamente in formato JSON valido:
+    Rispondi solo ed esclusivamente in formato JSON:
     {{
-      "calories": 75,
-      "carbs_g": 19.0,
-      "protein_g": 0.5,
-      "fat_g": 0.3,
-      "breakdown": "Mela 150g (~75 kcal)"
+      "calories": 450,
+      "carbs_g": 55.0,
+      "protein_g": 30.0,
+      "fat_g": 12.0,
+      "breakdown": "Riso 90g (~315 kcal) + olio 5g (~45 kcal) + pollo 100g (~110 kcal)"
     }}
     """
     try:
         resp = client.models.generate_content(
             model=ACTIVE_MODEL,
             contents=prompt,
-            config={
-                "response_mime_type": "application/json"
-            }
+            config={"response_mime_type": "application/json"}
         )
-        # Pulisce eventuale markdown residuo
         cleaned_text = resp.text.strip().replace("```json", "").replace("```", "")
         return json.loads(cleaned_text)
     except Exception as e:
         st.error(f"Dettaglio errore Gemini: {e}")
         return None
-Salva su GitHub: appena Streamlit si riavvia, riprova a cliccare ✨ Stima Calorie con Gemini. Se c'è ancora un problema di chiave, ti mostrerà il messaggio preciso invece di andare in blocco generico.
-# --- HEADER STATO MOBILE (ISPIRATO AL DESIGN) ---
+
+# --- HEADER STATO MOBILE ---
 st.markdown(f"""
 <div class="metric-card-green">
     <div style="display:flex; justify-content:space-between; align-items:center;">
@@ -381,7 +373,6 @@ with tab_register:
         key="meal_desc_field"
     )
 
-    # --- TRIGGER CALCOLO GEMINI ---
     col_gem1, col_gem2 = st.columns([1.5, 1])
     with col_gem1:
         if st.button("✨ Stima Calorie con Gemini", use_container_width=True):
@@ -391,12 +382,9 @@ with tab_register:
                     if gemini_res:
                         st.session_state["gemini_calc"] = gemini_res
                         st.toast(f"Calcolate: {gemini_res.get('calories')} kcal!")
-                    else:
-                        st.error("Errore nel calcolo. Verifica la connessione API.")
             else:
                 st.warning("Descrivi prima cosa hai mangiato.")
 
-    # Valore calorie calcolato o standard
     gemini_data = st.session_state.get("gemini_calc", None)
     if gemini_data:
         default_cal = int(gemini_data.get("calories", 400))
@@ -451,20 +439,16 @@ with tab_register:
         st.toast(f"Pasto salvato per le {time_str}!")
         st.rerun()
 
-    # ==============================================================
-    # --- CALENDARIO A GRIGLIA CLICCABILE (ISPIRATO AL DESIGN) ---
-    # ==============================================================
+    # --- CALENDARIO A GRIGLIA CLICCABILE ---
     st.divider()
     st.markdown("### 📅 Diario & Calendario Pasti")
     
-    # Calcolo settimana attiva per il selettore giorni
     if "selected_calendar_date" not in st.session_state:
         st.session_state["selected_calendar_date"] = date.today()
 
     active_date = st.session_state["selected_calendar_date"]
     start_of_week = active_date - timedelta(days=active_date.weekday())
     
-    # Mese e Anno con freccette
     col_nav1, col_nav2, col_nav3 = st.columns([1, 3, 1])
     with col_nav1:
         if st.button("◀", use_container_width=True, help="Settimana precedente"):
@@ -477,15 +461,12 @@ with tab_register:
             st.session_state["selected_calendar_date"] += timedelta(days=7)
             st.rerun()
 
-    # Riga con i 7 giorni cliccabili a pillola
     day_cols = st.columns(7)
     day_names = ["L", "M", "M", "G", "V", "S", "D"]
     
     for i in range(7):
         current_day_date = start_of_week + timedelta(days=i)
         is_selected = (current_day_date == active_date)
-        is_today = (current_day_date == date.today())
-        
         btn_label = f"{day_names[i]}\n{current_day_date.day:02d}"
         
         with day_cols[i]:
@@ -494,7 +475,6 @@ with tab_register:
                 st.session_state["selected_calendar_date"] = current_day_date
                 st.rerun()
 
-    # Visualizzazione pasti per il giorno selezionato
     view_date_str = active_date.isoformat()
     day_meals = cursor.execute("""
         SELECT id, entry_time, meal_type, category_consumed, plate_summary, score, calories, image_path 
@@ -551,7 +531,7 @@ with tab_register:
 # === TAB 2: MONTE SETTIMANALE MOBILE ======
 # ==========================================
 with tab_quotas:
-    st.markdown(f"### 📊 Monte Settimanale Quote")
+    st.markdown("### 📊 Monte Settimanale Quote")
     st.caption(f"Settimana: **{current_week_str}** — Scorri in verticale le tue quote")
 
     for slot_name in ["Colazione", "Pranzo", "Spuntino", "Cena", "Spuntino Serale"]:
@@ -564,7 +544,6 @@ with tab_quotas:
                 max_val = data["max"]
                 rem = data["remaining"]
                 
-                # Progresso quota
                 pct = min(1.0, used / max_val) if max_val > 0 else 0
                 status_color = "#16a34a" if rem > 0 else "#dc2626"
                 
@@ -594,7 +573,7 @@ with tab_quotas:
             if last_id:
                 cursor.execute("DELETE FROM handy_logs WHERE id = ?", (last_id[0],))
                 conn.commit()
-                st.toast(f"Quota rimossa!")
+                st.toast("Quota rimossa!")
                 st.rerun()
             else:
                 st.warning("Nessun pasto registrato per questa voce.")
@@ -737,7 +716,6 @@ with tab_weight:
         df_w["entry_date"] = pd.to_datetime(df_w["entry_date"])
         latest_w = df_w.iloc[-1]["weight_kg"]
         min_historical = df_w["weight_kg"].min()
-        
         diff_target = latest_w - target_weight
 
         st.markdown(f"""
@@ -792,8 +770,8 @@ with tab_suggest:
                         model=ACTIVE_MODEL, contents=prompt, config={"response_mime_type": "application/json"}
                     )
                     st.session_state["suggestions"] = json.loads(resp.text).get("proposals", [])
-                except Exception:
-                    st.error("Errore nel recupero delle proposte.")
+                except Exception as e:
+                    st.error(f"Errore: {e}")
 
         if "suggestions" in st.session_state:
             for p in st.session_state["suggestions"]:
